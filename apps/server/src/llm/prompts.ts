@@ -8,7 +8,7 @@ import {
   attachmentKind,
   jsonSchemaOf,
 } from "@myday/schema";
-import type { CapabilityRow, ComponentRow, SimilarFeature } from "../db";
+import type { CapabilityRow, ComponentRow, FeatureRow, SimilarFeature } from "../db";
 
 /**
  * Per-tier system prompts, generated from the Zod schemas + the live registry
@@ -107,9 +107,16 @@ export function plannerSystem(
   components: ComponentRow[],
   capabilities: CapabilityRow[],
   cacheCandidates: SimilarFeature[],
+  currentFeatures: FeatureRow[],
   attachments: Attachment[] = [],
 ): string {
   const attachSection = attachmentSection(attachments);
+  const dashboard =
+    currentFeatures.length === 0
+      ? "(empty)"
+      : currentFeatures
+          .map((f) => `- id "${f.id}": ${f.name} — ${f.description}`)
+          .join("\n");
   const candidates =
     cacheCandidates.length === 0
       ? "(none)"
@@ -136,12 +143,16 @@ ${componentIndex(components)}
 Existing capabilities (reusable — do NOT plan duplicates):
 ${capabilityIndex(capabilities)}
 
+Widgets currently on the dashboard:
+${dashboard}
+
 Cached features similar to this request:
 ${candidates}
 ${attachSection ? `\n${attachSection}\n` : ""}
 Rules:
+- INTENT — decide FIRST. If the user asks to REMOVE, DELETE, hide, clear, or get rid of one or more widgets already on the dashboard, set "intent": "remove" and "removeFeatureIds" to the ids of the matching widgets from the list above; leave all build fields empty and feasible: true. Never "build" a widget that merely claims something was removed — removal is a real action, not a widget. If no dashboard widget matches what they asked to remove, set feasible: false with a declineReason saying you couldn't find a matching widget. Otherwise set "intent": "create".
 - If the user attached files, the request IS feasible via those attachment URLs (they need no key) — build a widget that displays/plays/links them; do not decline for lack of an API.
-- FEASIBILITY GATE — decide FIRST. A request is only feasible if it can be built from built-in primitives, generated components, and keyless public APIs (no API key, no login, no private/account data) running inside the sandbox. If it fundamentally requires a private/authenticated API key, access to the user's accounts or devices, real-time data with no keyless source, or anything impossible in a browser+sandbox, set "feasible": false, leave the other build fields empty, and write "declineReason": a clear, friendly, SPECIFIC explanation of the exact reason (name what it would need and why this app can't do it) followed by a short suggestion to try something else. When feasible, set "feasible": true and "declineReason": "".
+- FEASIBILITY GATE — decide next (for create intent). A request is only feasible if it can be built from built-in primitives, generated components, and keyless public APIs (no API key, no login, no private/account data) running inside the sandbox. If it fundamentally requires a private/authenticated API key, access to the user's accounts or devices, real-time data with no keyless source, or anything impossible in a browser+sandbox, set "feasible": false, leave the other build fields empty, and write "declineReason": a clear, friendly, SPECIFIC explanation of the exact reason (name what it would need and why this app can't do it) followed by a short suggestion to try something else. When feasible, set "feasible": true and "declineReason": "".
 - If a cache candidate clearly satisfies the request, set "cacheHit" to its id.
 - Only add needsComponents / needsCapabilities entries when nothing existing (built-in or generated) fits.
 - needsComponents ids are PascalCase (e.g. "Image"); needsCapabilities ids are kebab-case (e.g. "cat-gif").

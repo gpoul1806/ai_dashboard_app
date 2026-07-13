@@ -65,6 +65,8 @@ export function featuresRouter(db: Db, orchestrator: Orchestrator): Router {
         // client shows a toast + the LLM's collapsible explanation.
         if (result.status === "declined") {
           res.json({ declined: true, reason: result.reason });
+        } else if (result.status === "removed") {
+          res.json({ removed: result.removed });
         } else {
           res.json({
             declined: false,

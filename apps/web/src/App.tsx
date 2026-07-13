@@ -151,6 +151,16 @@ export default function App() {
         pending.map((p) => api.uploadFile(p.file, controller.signal)),
       );
       const result = await api.requestFeature(request, attachments, controller.signal);
+      if ("removed" in result) {
+        // A management action, not a build — refresh so the removed widgets go.
+        setText("");
+        await refresh();
+        const removedNames = result.removed.map((r) => r.name).join(", ");
+        setStatus(
+          result.removed.length > 0 ? `Removed: ${removedNames}.` : "Nothing matched to remove.",
+        );
+        return;
+      }
       if (result.declined) {
         // Not an error — a graceful, explained decline.
         setStatus(null);

@@ -104,6 +104,50 @@ describe("Orchestrator — Tier 1 composition", () => {
     expect(await db.listComponents()).toHaveLength(0);
   });
 
+  it("removes an existing widget instead of building an acknowledgement", async () => {
+    // Build one widget first.
+    responses.push(
+      JSON.stringify({ widgetPlan: "a card" }),
+      JSON.stringify({
+        id: "note",
+        name: "Note",
+        description: "a sticky note",
+        version: 1,
+        root: { type: "Card", props: { title: "Note" } },
+      }),
+    );
+    const built = await orchestrator.handleRequest("a sticky note");
+    expect(built.status).toBe("ok");
+    if (built.status !== "ok") return;
+    const featureId = built.feature.id;
+    expect(await db.listFeatures()).toHaveLength(1);
+
+    // Now remove it. "remove" bypasses the cache and goes straight to the
+    // planner, which returns a remove intent with the matched id.
+    responses.push(JSON.stringify({ intent: "remove", removeFeatureIds: [featureId] }));
+    const removed = await orchestrator.handleRequest("remove the sticky note");
+    expect(removed.status).toBe("removed");
+    if (removed.status !== "removed") return;
+    expect(removed.removed.map((r) => r.name)).toEqual(["Note"]);
+    // Actually gone — not a fabricated "acknowledged" widget.
+    expect(await db.listFeatures()).toHaveLength(0);
+  });
+
+  it("declines a removal when no widget matches", async () => {
+    responses.push(
+      JSON.stringify({
+        intent: "remove",
+        removeFeatureIds: [],
+        feasible: false,
+        declineReason: "There's no weather widget on your dashboard to remove.",
+      }),
+    );
+    const res = await orchestrator.handleRequest("remove the weather widget");
+    expect(res.status).toBe("declined");
+    if (res.status !== "declined") return;
+    expect(res.reason).toContain("weather");
+  });
+
   it("declines an infeasible request with the planner's reason (no widget built)", async () => {
     responses.push(
       JSON.stringify({

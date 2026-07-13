@@ -76,10 +76,20 @@ export function validatePlan(raw: unknown): Validated<Plan> {
   if (!parsed.success) return { ok: false, errors: zodErrors(parsed.error) };
   const plan = parsed.data;
   if (!plan.feasible) {
+    // Includes "couldn't find a widget to remove" — a decline, not a build.
     if (!plan.declineReason.trim()) {
       return {
         ok: false,
         errors: ["declineReason: required (explain the exact reason) when feasible is false"],
+      };
+    }
+  } else if (plan.intent === "remove") {
+    if (plan.removeFeatureIds.length === 0) {
+      return {
+        ok: false,
+        errors: [
+          'removeFeatureIds: required when intent is "remove" and feasible is true (or set feasible:false with a declineReason if nothing matched)',
+        ],
       };
     }
   } else if (!plan.widgetPlan.trim()) {

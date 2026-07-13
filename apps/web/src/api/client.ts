@@ -44,6 +44,10 @@ export type RequestFeatureResult =
       declined: true;
       /** LLM-authored explanation of exactly why the request couldn't be built. */
       reason: string;
+    }
+  | {
+      /** Widgets removed from the dashboard by this request. */
+      removed: Array<{ id: string; name: string }>;
     };
 
 async function http<T>(path: string, init?: RequestInit): Promise<T> {

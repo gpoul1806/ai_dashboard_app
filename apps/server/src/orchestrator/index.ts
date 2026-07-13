@@ -41,10 +41,24 @@ export type OrchestratorResult =
       pendingApprovals: string[];
     }
   | {
+      status: "removed";
+      /** Widgets deleted from the dashboard by this request. */
+      removed: Array<{ id: string; name: string }>;
+    }
+  | {
       status: "declined";
       /** LLM-authored, user-facing explanation of exactly why it couldn't be built. */
       reason: string;
     };
+
+/** Heuristic gate: does the request look like a manage/remove command? Used
+ *  only to bypass the create-cache so the planner can classify intent — the
+ *  planner remains the authority on what actually happens. */
+function looksLikeManagement(text: string): boolean {
+  return /\b(remove|delete|hide|get rid of|take (?:down|away)|clear|dismiss|close)\b/i.test(
+    text,
+  );
+}
 
 /** Runs an LLM generation step with one retry (errors appended), then fails. */
 async function generateValidated<T>(
@@ -141,13 +155,21 @@ export class Orchestrator {
 
     const components = await this.db.listComponents();
     const capabilities = await this.db.listCapabilities();
+    const currentFeatures = await this.db.listFeatures();
     // Load image attachments as vision blocks so the planner/component gen can
     // actually see screenshots/photos (not just their filenames).
     const images = await this.loadImages(attachments);
 
+    // Management requests (remove/delete/hide …) must never be short-circuited
+    // by the create-cache — that's how "remove the todo list" used to serve a
+    // fabricated "acknowledged" widget. Route them straight to the planner.
+    const isManagement = looksLikeManagement(requestText);
+    const useCache = attachments.length === 0 && !isManagement;
+
     // Cache check — skip when files are attached (each upload is unique, so a
-    // prior text-similar feature would point at the wrong asset).
-    if (attachments.length === 0) {
+    // prior text-similar feature would point at the wrong asset) or when the
+    // request looks like a management command.
+    if (useCache) {
       const candidates = await this.db.findSimilarFeatures(requestText, 5);
       const best = candidates[0];
       if (best && best.similarity >= config.similarityThreshold) {
@@ -155,8 +177,7 @@ export class Orchestrator {
         return { status: "ok", feature: best.feature, cached: true, pendingApprovals: [] };
       }
     }
-    const candidates =
-      attachments.length === 0 ? await this.db.findSimilarFeatures(requestText, 5) : [];
+    const candidates = useCache ? await this.db.findSimilarFeatures(requestText, 5) : [];
 
     // Plan. A planner failure (e.g. model/API error) becomes an explained
     // decline rather than a 500 — the app degrades gracefully.
@@ -164,7 +185,7 @@ export class Orchestrator {
     try {
       plan = await generateValidated<Plan>(
         "planner",
-        plannerSystem(components, capabilities, candidates, attachments),
+        plannerSystem(components, capabilities, candidates, currentFeatures, attachments),
         `User request: ${requestText}`,
         validatePlan,
         (tokens, retries, success) =>
@@ -176,6 +197,26 @@ export class Orchestrator {
       if (signal?.aborted) throw err; // client cancelled — let the route drop it
       const technical = err instanceof Error ? err.message : String(err);
       return { status: "declined", reason: await explainFailure(requestText, technical) };
+    }
+
+    // Removal: delete the matched widgets instead of building anything.
+    if (plan.intent === "remove") {
+      const ids = new Set(plan.removeFeatureIds);
+      const targets = currentFeatures.filter((f) => ids.has(f.id));
+      if (targets.length === 0) {
+        return {
+          status: "declined",
+          reason:
+            plan.declineReason ||
+            "I couldn't find a widget matching that to remove. Check the widget name and try again.",
+        };
+      }
+      const removed: Array<{ id: string; name: string }> = [];
+      for (const f of targets) {
+        if (await this.db.deleteFeature(f.id)) removed.push({ id: f.id, name: f.name });
+      }
+      await this.log(requestText, "plan", false, true, 0, 0);
+      return { status: "removed", removed };
     }
 
     // Feasibility gate: the planner decided this can't be fulfilled here

@@ -153,6 +153,14 @@ export function attachmentKind(mimeType: string): "image" | "audio" | "video" | 
 
 export const PlanSchema = z.object({
   /**
+   * "create" → build/serve a widget (the default). "remove" → the user asked
+   * to delete existing widget(s) from the dashboard; no widget is generated,
+   * the matched features are removed instead.
+   */
+  intent: z.enum(["create", "remove"]).default("create"),
+  /** When intent is "remove", the ids of existing features to delete. */
+  removeFeatureIds: z.array(z.string()).default([]),
+  /**
    * Whether the request can be fulfilled here (keyless public APIs + built-ins,
    * inside the sandbox). false → the pipeline stops and the user is shown the
    * decline reason instead of a widget.
