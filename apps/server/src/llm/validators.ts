@@ -198,7 +198,26 @@ const HANDLER_FORBIDDEN: Array<[RegExp, string]> = [
   [/\beval\s*\(/, "eval is forbidden"],
   [/new\s+Function/, "Function constructor is forbidden"],
   [/\bfetch\s*\(/, "bare fetch is not available — use ctx.capFetch"],
-  [/\bsk-[A-Za-z0-9-]{10,}/, "looks like an embedded API key — use {{secret:NAME}} placeholders"],
+  // API-FREE enforcement: capabilities must work with no key and no secrets.
+  // A key-requiring capability is dead-on-arrival (no secret is configured),
+  // so reject it here — the error is appended to the retry prompt, steering
+  // the model to a keyless public API instead.
+  [
+    /\{\{\s*secret\s*:/i,
+    "API-FREE required: remove the {{secret:...}} placeholder and use a keyless public API (e.g. cataas.com, picsum.photos, dog.ceo) that needs no key",
+  ],
+  [
+    /\b(api[_-]?key|apikey|access[_-]?token|client[_-]?secret)\b/i,
+    "API-FREE required: this capability references an API key/token — switch to a keyless public API that needs no authentication",
+  ],
+  [
+    /["']authorization["']\s*:/i,
+    "API-FREE required: do not send an Authorization header — use a keyless public API",
+  ],
+  [
+    /\bsk-[A-Za-z0-9-]{10,}/,
+    "looks like an embedded API key — API-FREE required: use a keyless public API",
+  ],
 ];
 
 export async function validateCapabilitySpec(

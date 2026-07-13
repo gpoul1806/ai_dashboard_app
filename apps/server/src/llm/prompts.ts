@@ -115,7 +115,7 @@ Rules:
 - Only add needsComponents / needsCapabilities entries when nothing existing (built-in or generated) fits.
 - needsComponents ids are PascalCase (e.g. "Image"); needsCapabilities ids are kebab-case (e.g. "giphy-search").
 - Client components have NO direct network access; anything that needs external data needs a capability.
-- Prefer external APIs that work WITHOUT an API key. If a key is unavoidable, note it in the capability description.
+- API-FREE ONLY: any capability you plan MUST be satisfiable with a keyless public API (no API key, no auth). Never plan a capability around a provider that requires a key (e.g. Giphy, OpenWeather) — choose a keyless alternative (e.g. cataas.com for cats, picsum.photos for images, dog.ceo, date.nager.at). If no keyless option exists for the request, prefer composing from built-ins instead of planning a key-requiring capability.
 - "widgetPlan" is a concrete one-paragraph spec for the Tier 1 composer.
 
 Respond with ONLY a JSON object (no prose, no markdown fence) matching this JSON Schema:
@@ -139,8 +139,9 @@ Each endpoint's "handlerSource" MUST be a single async arrow function EXPRESSION
 - capFetch(url, opts?) — outbound HTTP, restricted to the capability's domainAllowlist. opts = { method?, headers?, body? }. Returns { status, headers, body /* string */, json(), text() }.
 - capStore — namespaced per-capability KV: await capStore.get(key) / capStore.set(key, value) / capStore.delete(key) / capStore.list().
 - The sandbox has NOTHING else: no require/import, no process, no fs, no fetch, no timers. Do not reference them.
-- Secrets: NEVER put a real API key in the source. If a third-party key is required, use the literal placeholder string "{{secret:KEY_NAME}}" inside a header value or the URL; the HOST substitutes the real value at egress. Strongly prefer public/keyless APIs.
-- domainAllowlist must list exactly the domains capFetch needs (e.g. ["api.giphy.com"]). Adding a domain is a logged, reviewed event — keep it minimal.
+- API-FREE REQUIREMENT (hard rule): the capability MUST work with NO API key and NO configured secrets. Call ONLY public APIs that need no authentication. Do NOT emit "{{secret:...}}" placeholders, and do NOT send Authorization / api_key / token / apikey / x-api-key / client_id headers or query params. If the obvious provider needs a key (Giphy, Tenor with a key, OpenWeather, YouTube Data API, News API, ...), pick a keyless alternative or a direct public media URL instead. A capability that needs a key is rejected.
+- Keyless sources you can rely on (examples): cat images/GIFs → https://cataas.com ("https://cataas.com/cat/gif", or "https://cataas.com/cat?json=true" for metadata, or "https://cataas.com/api/cats?tags=..." to search); any-topic random image → https://picsum.photos ("https://picsum.photos/seed/<word>/300"); dog images → https://dog.ceo/api/breeds/image/random; jokes → https://icanhazdadjoke.com (send header {"Accept":"application/json"} — that is allowed, it is not auth); public holidays → https://date.nager.at. Prefer returning a direct media URL when the source exposes one (e.g. cataas image URLs) so no key is ever involved.
+- domainAllowlist must list exactly the keyless domains capFetch needs (e.g. ["cataas.com"]). Adding a domain is a logged, reviewed event — keep it minimal.
 - Return JSON-serializable bodies and appropriate status codes; validate query/body inputs defensively.
 
 Respond with ONLY a JSON object (no prose, no markdown fence) matching this JSON Schema:
