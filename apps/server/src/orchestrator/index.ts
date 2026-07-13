@@ -8,7 +8,7 @@ import {
 } from "@myday/schema";
 import { config } from "../config";
 import type { CapabilityRow, ComponentRow, Db, FeatureRow } from "../db";
-import { generateText, llmAvailable } from "../llm/client";
+import { explainFailure, generateText, llmAvailable } from "../llm/client";
 import {
   plannerSystem,
   tier1System,
@@ -25,12 +25,19 @@ import {
 } from "../llm/validators";
 import type { SandboxRuntime } from "../sandbox";
 
-export interface OrchestratorResult {
-  feature: FeatureRow;
-  cached: boolean;
-  /** Capability keys generated this run that still need dev approval. */
-  pendingApprovals: string[];
-}
+export type OrchestratorResult =
+  | {
+      status: "ok";
+      feature: FeatureRow;
+      cached: boolean;
+      /** Capability keys generated this run that still need dev approval. */
+      pendingApprovals: string[];
+    }
+  | {
+      status: "declined";
+      /** LLM-authored, user-facing explanation of exactly why it couldn't be built. */
+      reason: string;
+    };
 
 /** Runs an LLM generation step with one retry (errors appended), then fails. */
 async function generateValidated<T>(
@@ -108,7 +115,12 @@ export class Orchestrator {
     const best = candidates[0];
     if (best && best.similarity >= config.similarityThreshold) {
       await this.log(requestText, "cache", true, true, 0, 0);
-      return { feature: best.feature, cached: true, pendingApprovals: [] };
+      return {
+        status: "ok",
+        feature: best.feature,
+        cached: true,
+        pendingApprovals: [],
+      };
     }
 
     // Plan.
@@ -121,20 +133,34 @@ export class Orchestrator {
         void this.log(requestText, "plan", false, success, retries, tokens),
     );
 
+    // Feasibility gate: the planner decided this can't be fulfilled here
+    // (needs a key/account/impossible). Decline gracefully with its reason.
+    if (!plan.feasible) {
+      await this.log(requestText, "plan", false, false, 0, 0);
+      return { status: "declined", reason: plan.declineReason };
+    }
+
     if (plan.cacheHit) {
       const cached = await this.db.getFeature(plan.cacheHit);
       if (cached) {
         await this.log(requestText, "cache", true, true, 0, 0);
-        return { feature: cached, cached: true, pendingApprovals: [] };
+        return { status: "ok", feature: cached, cached: true, pendingApprovals: [] };
       }
     }
 
-    // Tier 3 → Tier 2 → Tier 1, each validated before the next runs.
-    const pendingApprovals = await this.runTier3(requestText, plan);
-    await this.runTier2(requestText, plan);
-    const feature = await this.runTier1(requestText, plan);
-
-    return { feature, cached: false, pendingApprovals };
+    // Tier 3 → Tier 2 → Tier 1, each validated before the next runs. Any hard
+    // failure (e.g. no keyless capability survives validation+retry) becomes an
+    // explained decline rather than a 500.
+    try {
+      const pendingApprovals = await this.runTier3(requestText, plan);
+      await this.runTier2(requestText, plan);
+      const feature = await this.runTier1(requestText, plan);
+      return { status: "ok", feature, cached: false, pendingApprovals };
+    } catch (err) {
+      const technical = err instanceof Error ? err.message : String(err);
+      const reason = await explainFailure(requestText, technical);
+      return { status: "declined", reason };
+    }
   }
 
   /* -------------------- Tier 3 -------------------- */

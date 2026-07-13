@@ -111,12 +111,13 @@ Cached features similar to this request:
 ${candidates}
 
 Rules:
+- FEASIBILITY GATE — decide FIRST. A request is only feasible if it can be built from built-in primitives, generated components, and keyless public APIs (no API key, no login, no private/account data) running inside the sandbox. If it fundamentally requires a private/authenticated API key, access to the user's accounts or devices, real-time data with no keyless source, or anything impossible in a browser+sandbox, set "feasible": false, leave the other build fields empty, and write "declineReason": a clear, friendly, SPECIFIC explanation of the exact reason (name what it would need and why this app can't do it) followed by a short suggestion to try something else. When feasible, set "feasible": true and "declineReason": "".
 - If a cache candidate clearly satisfies the request, set "cacheHit" to its id.
 - Only add needsComponents / needsCapabilities entries when nothing existing (built-in or generated) fits.
-- needsComponents ids are PascalCase (e.g. "Image"); needsCapabilities ids are kebab-case (e.g. "giphy-search").
+- needsComponents ids are PascalCase (e.g. "Image"); needsCapabilities ids are kebab-case (e.g. "cat-gif").
 - Client components have NO direct network access; anything that needs external data needs a capability.
-- API-FREE ONLY: any capability you plan MUST be satisfiable with a keyless public API (no API key, no auth). Never plan a capability around a provider that requires a key (e.g. Giphy, OpenWeather) — choose a keyless alternative (e.g. cataas.com for cats, picsum.photos for images, dog.ceo, date.nager.at). If no keyless option exists for the request, prefer composing from built-ins instead of planning a key-requiring capability.
-- "widgetPlan" is a concrete one-paragraph spec for the Tier 1 composer.
+- API-FREE ONLY: any capability you plan MUST be satisfiable with a keyless public API (no API key, no auth). Never plan a capability around a provider that requires a key (e.g. Giphy, OpenWeather) — choose a keyless alternative (e.g. cataas.com for cats, picsum.photos for images, dog.ceo, date.nager.at). If the request truly needs data only a keyed/private API provides, that is an INFEASIBLE request — set feasible:false with a reason rather than planning a key-requiring capability.
+- "widgetPlan" is a concrete one-paragraph spec for the Tier 1 composer (required when feasible; "" when infeasible).
 
 Respond with ONLY a JSON object (no prose, no markdown fence) matching this JSON Schema:
 ${js(PlanSchema)}`;

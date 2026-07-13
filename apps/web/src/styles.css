@@ -124,6 +124,80 @@ body {
 }
 .widget-error { color: #a33; }
 
+/* ---- toast ---- */
+.toast {
+  position: fixed;
+  top: 20px;
+  left: 50%;
+  transform: translateX(-50%);
+  z-index: 200;
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  max-width: 90vw;
+  padding: 12px 16px;
+  background: #2b2622;
+  color: #f4efe6;
+  border-radius: 10px;
+  box-shadow: 0 6px 24px rgba(20, 12, 4, 0.3);
+  font-size: 14px;
+  animation: toast-in 0.2s ease-out;
+}
+@keyframes toast-in {
+  from { opacity: 0; transform: translate(-50%, -8px); }
+  to { opacity: 1; transform: translate(-50%, 0); }
+}
+.toast-close {
+  background: none;
+  border: none;
+  color: #cbb8a6;
+  font-size: 18px;
+  line-height: 1;
+  cursor: pointer;
+  padding: 0 2px;
+}
+
+/* ---- declined notice + collapsible reason ---- */
+.declined-notice {
+  margin-top: 12px;
+  max-width: 720px;
+  border: 1px solid #e0c9b0;
+  background: #fbf3ea;
+  border-radius: 10px;
+  padding: 10px 14px;
+}
+.declined-head {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 12px;
+  font-size: 14px;
+  color: #8a5a2b;
+  font-weight: 600;
+}
+.declined-dismiss {
+  background: none;
+  border: none;
+  color: #b08a5a;
+  font-size: 18px;
+  line-height: 1;
+  cursor: pointer;
+}
+.declined-details { margin-top: 6px; }
+.declined-details summary {
+  cursor: pointer;
+  font-size: 13px;
+  color: #6a6152;
+  user-select: none;
+}
+.declined-reason {
+  margin: 8px 0 2px;
+  font-size: 14px;
+  line-height: 1.5;
+  color: #3a352c;
+  white-space: pre-wrap;
+}
+
 /* ---- dev panel ---- */
 .dev-panel {
   position: fixed;

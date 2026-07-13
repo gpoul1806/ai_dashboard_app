@@ -54,6 +54,26 @@ function DevPanel({
   );
 }
 
+interface Declined {
+  request: string;
+  reason: string;
+}
+
+function Toast({ message, onDone }: { message: string; onDone: () => void }) {
+  useEffect(() => {
+    const t = setTimeout(onDone, 6000);
+    return () => clearTimeout(t);
+  }, [message, onDone]);
+  return (
+    <div className="toast" role="status">
+      <span>{message}</span>
+      <button className="toast-close" onClick={onDone} aria-label="Dismiss">
+        ×
+      </button>
+    </div>
+  );
+}
+
 export default function App() {
   const [features, setFeatures] = useState<FeatureRecord[]>([]);
   const [capabilities, setCapabilities] = useState<CapabilityRecord[]>([]);
@@ -61,6 +81,8 @@ export default function App() {
   const [busy, setBusy] = useState(false);
   const [status, setStatus] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [toast, setToast] = useState<string | null>(null);
+  const [declined, setDeclined] = useState<Declined | null>(null);
 
   const refresh = useCallback(async () => {
     const [f, c] = await Promise.all([api.listFeatures(), api.listCapabilities()]);
@@ -77,9 +99,17 @@ export default function App() {
     if (!request || busy) return;
     setBusy(true);
     setError(null);
+    setDeclined(null);
     setStatus("Thinking… the orchestrator is planning and generating (this can take a minute).");
     try {
       const result = await api.requestFeature(request);
+      if (result.declined) {
+        // Not an error — a graceful, explained decline.
+        setStatus(null);
+        setToast("That one can’t be built here — try something else.");
+        setDeclined({ request, reason: result.reason });
+        return;
+      }
       setText("");
       await refresh();
       if (result.pendingApprovals.length > 0) {
@@ -130,7 +160,28 @@ export default function App() {
         </div>
         {status && <p className="status">{status}</p>}
         {error && <p className="error">{error}</p>}
+
+        {declined && (
+          <div className="declined-notice">
+            <div className="declined-head">
+              <span>Couldn’t build “{declined.request}”.</span>
+              <button
+                className="declined-dismiss"
+                onClick={() => setDeclined(null)}
+                aria-label="Dismiss"
+              >
+                ×
+              </button>
+            </div>
+            <details className="declined-details">
+              <summary>Why? (from the assistant)</summary>
+              <p className="declined-reason">{declined.reason}</p>
+            </details>
+          </div>
+        )}
       </header>
+
+      {toast && <Toast message={toast} onDone={() => setToast(null)} />}
 
       <main className="dashboard">
         {flowFeatures.length === 0 && (

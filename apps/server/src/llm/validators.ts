@@ -74,7 +74,18 @@ function zodErrors(error: { issues: Array<{ path: PropertyKey[]; message: string
 export function validatePlan(raw: unknown): Validated<Plan> {
   const parsed = PlanSchema.safeParse(raw);
   if (!parsed.success) return { ok: false, errors: zodErrors(parsed.error) };
-  return { ok: true, value: parsed.data };
+  const plan = parsed.data;
+  if (!plan.feasible) {
+    if (!plan.declineReason.trim()) {
+      return {
+        ok: false,
+        errors: ["declineReason: required (explain the exact reason) when feasible is false"],
+      };
+    }
+  } else if (!plan.widgetPlan.trim()) {
+    return { ok: false, errors: ["widgetPlan: required when feasible is true"] };
+  }
+  return { ok: true, value: plan };
 }
 
 /* ------------------------------------------------------------------ */

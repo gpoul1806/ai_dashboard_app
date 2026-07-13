@@ -128,6 +128,18 @@ export function capabilityKey(spec: Pick<CapabilitySpec, "id" | "version">): str
 /* ------------------------------------------------------------------ */
 
 export const PlanSchema = z.object({
+  /**
+   * Whether the request can be fulfilled here (keyless public APIs + built-ins,
+   * inside the sandbox). false → the pipeline stops and the user is shown the
+   * decline reason instead of a widget.
+   */
+  feasible: z.boolean().default(true),
+  /**
+   * When feasible is false, a clear, friendly, user-facing explanation of the
+   * exact reason (e.g. needs a private API key / account access / impossible in
+   * this environment) plus a nudge to try something else. Empty when feasible.
+   */
+  declineReason: z.string().default(""),
   /** Feature id of an existing cached feature that satisfies the request, else null. */
   cacheHit: z.string().nullable().default(null),
   /** New server capabilities that must be generated (Tier 3). */
@@ -138,8 +150,8 @@ export const PlanSchema = z.object({
   needsComponents: z
     .array(z.object({ id: z.string(), description: z.string() }))
     .default([]),
-  /** One-paragraph spec of the widget Tier 1 should compose. */
-  widgetPlan: z.string().min(1),
+  /** One-paragraph spec of the widget Tier 1 should compose (may be empty when infeasible). */
+  widgetPlan: z.string().default(""),
 });
 export type Plan = z.infer<typeof PlanSchema>;
 

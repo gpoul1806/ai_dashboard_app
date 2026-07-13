@@ -32,7 +32,14 @@ export function featuresRouter(db: Db, orchestrator: Orchestrator): Router {
       const text = String((req.body as { text?: unknown })?.text ?? "").trim();
       if (!text) throw new HttpError(400, "request text is required");
       const result = await orchestrator.handleRequest(text);
+      // A declined request is a normal (200) outcome, not an error — the client
+      // shows a toast + the LLM's collapsible explanation.
+      if (result.status === "declined") {
+        res.json({ declined: true, reason: result.reason });
+        return;
+      }
       res.json({
+        declined: false,
         feature: toApi(result.feature),
         cached: result.cached,
         pendingApprovals: result.pendingApprovals,

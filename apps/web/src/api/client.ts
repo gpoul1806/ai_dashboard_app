@@ -31,11 +31,18 @@ export interface CapabilityRecord {
   approved: boolean;
 }
 
-export interface RequestFeatureResult {
-  feature: FeatureRecord;
-  cached: boolean;
-  pendingApprovals: string[];
-}
+export type RequestFeatureResult =
+  | {
+      declined: false;
+      feature: FeatureRecord;
+      cached: boolean;
+      pendingApprovals: string[];
+    }
+  | {
+      declined: true;
+      /** LLM-authored explanation of exactly why the request couldn't be built. */
+      reason: string;
+    };
 
 async function http<T>(path: string, init?: RequestInit): Promise<T> {
   const res = await fetch(path, {

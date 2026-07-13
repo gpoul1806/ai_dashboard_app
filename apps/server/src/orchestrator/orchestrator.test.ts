@@ -50,6 +50,8 @@ describe("Orchestrator — Tier 1 composition", () => {
     );
 
     const result = await orchestrator.handleRequest("show me a greeting card");
+    expect(result.status).toBe("ok");
+    if (result.status !== "ok") return;
     expect(result.cached).toBe(false);
     expect(result.feature.name).toBe("Greeting");
     expect(result.feature.definition.root.type).toBe("Card");
@@ -80,7 +82,27 @@ describe("Orchestrator — Tier 1 composition", () => {
     );
 
     const result = await orchestrator.handleRequest("make an x");
+    expect(result.status).toBe("ok");
+    if (result.status !== "ok") return;
     expect(result.feature.definition.root.type).toBe("Text");
+  });
+
+  it("declines an infeasible request with the planner's reason (no widget built)", async () => {
+    responses.push(
+      JSON.stringify({
+        feasible: false,
+        declineReason:
+          "That needs access to your private Gmail account, which requires an API key and login this app can't use. Try asking for a plain notes or todo widget instead.",
+      }),
+    );
+
+    const result = await orchestrator.handleRequest("show my gmail inbox");
+    expect(result.status).toBe("declined");
+    if (result.status !== "declined") return;
+    expect(result.reason).toContain("Gmail");
+    // Nothing was built.
+    expect(await db.listFeatures()).toHaveLength(0);
+    expect(await db.listComponents()).toHaveLength(0);
   });
 });
 
@@ -100,6 +122,8 @@ describe("Orchestrator — feature cache", () => {
 
     // No new responses queued: a cache hit must not hit the LLM.
     const cached = await orchestrator.handleRequest("a todo list to track my daily tasks");
+    expect(cached.status).toBe("ok");
+    if (cached.status !== "ok") return;
     expect(cached.cached).toBe(true);
     expect(cached.feature.name).toBe("Todo");
   });
@@ -158,6 +182,8 @@ describe("Orchestrator — Tier 3 + Tier 2 + Tier 1", () => {
     );
 
     const result = await orchestrator.handleRequest("a cat gif top-right");
+    expect(result.status).toBe("ok");
+    if (result.status !== "ok") return;
     expect(result.feature.definition.placement).toBe("pinned");
     expect(result.pendingApprovals).toEqual(["cat-gif@1"]);
 

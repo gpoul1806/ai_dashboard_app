@@ -37,3 +37,25 @@ export async function generateText(opts: {
   const tokens = response.usage.input_tokens + response.usage.output_tokens;
   return { text, tokens };
 }
+
+/**
+ * Asks the model for a short, plain-language reason a request couldn't be
+ * built, so the user sees an LLM-authored explanation rather than a stack
+ * trace. Best-effort: falls back to the raw error text if the call fails.
+ */
+export async function explainFailure(
+  requestText: string,
+  technicalError: string,
+): Promise<string> {
+  try {
+    const { text } = await generateText({
+      maxTokens: 400,
+      system:
+        "You are the assistant behind a generative dashboard. A user's feature request could not be built. In 2-4 sentences, plainly explain the exact reason for a non-technical user, then suggest a concrete alternative they could ask for instead. Do not apologize excessively, do not include code, JSON, or stack traces.",
+      user: `User request: ${requestText}\n\nInternal reason it failed: ${technicalError}`,
+    });
+    return text.trim() || technicalError;
+  } catch {
+    return technicalError;
+  }
+}
