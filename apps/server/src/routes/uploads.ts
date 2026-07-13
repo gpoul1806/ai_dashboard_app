@@ -21,7 +21,14 @@ export function uploadsRouter(db: Db): Router {
         dataBase64?: unknown;
       };
       const filename = String(body.filename ?? "").trim() || "file";
-      const mimeType = String(body.mimeType ?? "application/octet-stream");
+      // Normalize the user-supplied MIME type to a strict `type/subtype` token
+      // before it is ever stored or written to a Content-Type header. Anything
+      // malformed (or carrying header-breaking characters) becomes the safe
+      // default octet-stream, which the serve path treats as a download.
+      const rawMime = String(body.mimeType ?? "").trim().toLowerCase();
+      const mimeType = /^[a-z0-9][\w.+-]*\/[a-z0-9][\w.+-]*$/.test(rawMime)
+        ? rawMime
+        : "application/octet-stream";
       const dataBase64 = String(body.dataBase64 ?? "");
       if (!dataBase64) throw new HttpError(400, "dataBase64 is required");
 
