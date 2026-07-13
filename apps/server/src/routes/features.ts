@@ -43,12 +43,17 @@ export function featuresRouter(db: Db, orchestrator: Orchestrator): Router {
         throw new HttpError(400, "request text or an attachment is required");
       }
 
-      // Cancellation: when the client aborts the fetch, the connection closes.
-      // Abort the request-scoped signal so the orchestrator stops the in-flight
-      // Claude calls (and stops spending tokens) instead of running to completion.
+      // Cancellation: abort the in-flight generation when the client
+      // disconnects (cancels the fetch). Listen on the RESPONSE, not the
+      // request: req's "close" fires as soon as the POST body is consumed —
+      // i.e. during every normal request — which would abort every request
+      // mid-flight and hang the client. res "close" only fires early (before
+      // the response finishes) on a real disconnect, so guard on writableEnded.
       const ac = new AbortController();
-      const onClose = () => ac.abort();
-      req.on("close", onClose);
+      const onClose = () => {
+        if (!res.writableEnded) ac.abort();
+      };
+      res.on("close", onClose);
 
       try {
         const result = await orchestrator.handleRequest(
@@ -72,7 +77,7 @@ export function featuresRouter(db: Db, orchestrator: Orchestrator): Router {
         if (ac.signal.aborted) return; // client cancelled — nothing to send back
         throw err;
       } finally {
-        req.off("close", onClose);
+        res.off("close", onClose);
       }
     } catch (err) {
       next(err);

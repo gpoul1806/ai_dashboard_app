@@ -54,6 +54,10 @@ function DevPanel({
   );
 }
 
+// Upper bound on a single request. Generous headroom for multi-tier generation
+// (planner → Tier 3 → Tier 2 → Tier 1, each with a retry), but never infinite.
+const REQUEST_TIMEOUT_MS = 180_000;
+
 interface Declined {
   request: string;
   reason: string;
@@ -134,6 +138,13 @@ export default function App() {
     );
     const controller = new AbortController();
     abortRef.current = controller;
+    // Never hang forever: if the request stalls (server restart, proxy hiccup,
+    // network stall), abort it and surface a timeout error.
+    let timedOut = false;
+    const timeoutId = setTimeout(() => {
+      timedOut = true;
+      controller.abort();
+    }, REQUEST_TIMEOUT_MS);
     try {
       // Upload any attached files first, then send their metadata with the request.
       const attachments = await Promise.all(
@@ -163,13 +174,19 @@ export default function App() {
         );
       }
     } catch (e) {
-      if (controller.signal.aborted || (e as Error)?.name === "AbortError") {
+      if (timedOut) {
+        setStatus(null);
+        setError(
+          `Request timed out after ${Math.round(REQUEST_TIMEOUT_MS / 1000)}s — the server didn't respond. Please try again.`,
+        );
+      } else if (controller.signal.aborted || (e as Error)?.name === "AbortError") {
         setStatus("Request cancelled.");
       } else {
         setError(String((e as Error)?.message ?? e));
         setStatus(null);
       }
     } finally {
+      clearTimeout(timeoutId);
       abortRef.current = null;
       setBusy(false);
     }
