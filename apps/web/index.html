@@ -1,0 +1,27 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>My Day — Generative Dashboard</title>
+    <!--
+      Import map for GENERATED components (Tier 2). They are served raw from
+      /api/components/*.js and import bare "react": the browser resolves that
+      through this map to a shim re-exporting the shell's React instance, so
+      there is only ever one React on the page.
+    -->
+    <script type="importmap">
+      {
+        "imports": {
+          "react": "/react-shim.js",
+          "react/jsx-runtime": "/jsx-runtime-shim.js",
+          "@shell/hooks": "/shell-hooks.js"
+        }
+      }
+    </script>
+  </head>
+  <body>
+    <div id="root"></div>
+    <script type="module" src="/src/main.tsx"></script>
+  </body>
+</html>

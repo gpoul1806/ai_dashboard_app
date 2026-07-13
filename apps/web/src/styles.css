@@ -1,0 +1,168 @@
+* { box-sizing: border-box; }
+
+body {
+  margin: 0;
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  background: #f2f0eb;
+  color: #24211c;
+}
+
+.app { min-height: 100vh; padding-bottom: 80px; }
+
+.app-header {
+  padding: 28px 32px 16px;
+  border-bottom: 1px solid #ddd8ce;
+  background: #faf8f4;
+}
+.app-header h1 { margin: 0 0 12px; font-size: 22px; }
+
+.ask { display: flex; gap: 8px; max-width: 720px; }
+.ask input {
+  flex: 1;
+  padding: 10px 14px;
+  border: 1px solid #c9c2b4;
+  border-radius: 8px;
+  font-size: 15px;
+  background: #fff;
+}
+.ask button {
+  padding: 10px 18px;
+  border: none;
+  border-radius: 8px;
+  background: #b4552d;
+  color: #fff;
+  font-size: 15px;
+  cursor: pointer;
+}
+.ask button:disabled { opacity: 0.5; cursor: default; }
+
+.status { color: #5a6b4f; margin: 10px 0 0; font-size: 14px; }
+.error { color: #a33; margin: 10px 0 0; font-size: 14px; }
+.muted { color: #8a836f; font-size: 13px; }
+
+.dashboard {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(340px, 1fr));
+  gap: 20px;
+  padding: 24px 32px;
+}
+.empty-dash { grid-column: 1 / -1; text-align: center; padding: 60px 0; }
+
+/* ---- primitives ---- */
+.ui-card {
+  background: #fff;
+  border: 1px solid #e3ddd1;
+  border-radius: 12px;
+  padding: 16px 18px;
+  box-shadow: 0 1px 3px rgba(40, 30, 10, 0.05);
+}
+.ui-card-title { margin: 0 0 12px; font-size: 16px; }
+.ui-card-body { display: flex; flex-direction: column; gap: 10px; }
+
+.ui-input, .ui-select {
+  padding: 8px 10px;
+  border: 1px solid #c9c2b4;
+  border-radius: 6px;
+  font-size: 14px;
+  flex: 1;
+  min-width: 0;
+}
+.ui-button {
+  padding: 8px 14px;
+  border: none;
+  border-radius: 6px;
+  background: #3c5a46;
+  color: #fff;
+  font-size: 14px;
+  cursor: pointer;
+  white-space: nowrap;
+}
+.ui-button:hover { filter: brightness(1.1); }
+
+.ui-list { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 6px; }
+.ui-list-item { padding: 6px 8px; border-radius: 6px; background: #f7f5f0; }
+.ui-empty { color: #8a836f; font-size: 14px; padding: 8px 0; }
+
+.ui-checkbox { display: inline-flex; align-items: center; gap: 6px; cursor: pointer; }
+
+.ui-text-title { font-weight: 600; font-size: 16px; }
+.ui-text-muted { color: #8a836f; font-size: 13px; }
+
+.ui-counter { display: flex; align-items: baseline; gap: 8px; }
+.ui-counter-value { font-size: 28px; font-weight: 700; }
+.ui-counter-label { color: #8a836f; }
+
+.ui-progress-wrap { display: flex; align-items: center; gap: 10px; }
+.ui-progress { flex: 1; height: 8px; background: #e7e2d6; border-radius: 4px; overflow: hidden; }
+.ui-progress-fill { height: 100%; background: #b4552d; transition: width 0.2s; }
+.ui-progress-label { font-size: 12px; color: #8a836f; min-width: 34px; }
+
+.ui-missing {
+  border: 1px dashed #c66;
+  color: #a33;
+  padding: 8px;
+  border-radius: 6px;
+  font-size: 13px;
+}
+
+/* ---- overlay slot ---- */
+.overlay-layer { position: fixed; inset: 0; pointer-events: none; z-index: 50; }
+.ui-overlay { position: fixed; pointer-events: auto; max-width: 320px; }
+.ui-overlay-top-right { top: 16px; right: 16px; }
+.ui-overlay-top-left { top: 16px; left: 16px; }
+.ui-overlay-bottom-right { bottom: 72px; right: 16px; }
+.ui-overlay-bottom-left { bottom: 72px; left: 16px; }
+.ui-overlay-center { top: 50%; left: 50%; transform: translate(-50%, -50%); }
+
+/* ---- widget states ---- */
+.widget-loading, .widget-error {
+  padding: 16px;
+  border-radius: 12px;
+  background: #fff;
+  border: 1px solid #e3ddd1;
+  font-size: 14px;
+}
+.widget-error { color: #a33; }
+
+/* ---- dev panel ---- */
+.dev-panel {
+  position: fixed;
+  bottom: 0;
+  left: 0;
+  right: 0;
+  z-index: 100;
+  background: #1f2420;
+  color: #e8e6df;
+}
+.dev-panel-toggle {
+  width: 100%;
+  padding: 8px 16px;
+  background: none;
+  border: none;
+  color: #b9c4ad;
+  text-align: left;
+  font-size: 13px;
+  cursor: pointer;
+}
+.dev-panel-body { padding: 4px 16px 16px; max-height: 40vh; overflow: auto; }
+.dev-panel-body h4 { margin: 6px 0; }
+.dev-panel-body ul { list-style: none; margin: 0; padding: 0; }
+.dev-cap {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 12px;
+  padding: 8px 0;
+  border-bottom: 1px solid #333a33;
+  font-size: 13px;
+}
+.dev-cap code { color: #f0c987; }
+.dev-cap .approve {
+  padding: 6px 12px;
+  border: none;
+  border-radius: 6px;
+  background: #b4552d;
+  color: #fff;
+  cursor: pointer;
+}
+.dev-cap .ok { color: #8fbf7f; }
