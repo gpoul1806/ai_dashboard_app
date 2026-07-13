@@ -1,14 +1,21 @@
 import {
+  type Attachment,
   type CapabilitySpec,
   type ComponentSpec,
   type Plan,
   type WidgetDefinition,
+  attachmentKind,
   capabilityKey,
   componentKey,
 } from "@myday/schema";
 import { config } from "../config";
 import type { CapabilityRow, ComponentRow, Db, FeatureRow } from "../db";
-import { explainFailure, generateText, llmAvailable } from "../llm/client";
+import {
+  explainFailure,
+  generateText,
+  type ImageInput,
+  llmAvailable,
+} from "../llm/client";
 import {
   plannerSystem,
   tier1System,
@@ -46,9 +53,14 @@ async function generateValidated<T>(
   user: string,
   validate: (raw: unknown) => Validated<T> | Promise<Validated<T>>,
   onLog: (tokens: number, retries: number, success: boolean) => void,
+  images: ImageInput[] = [],
 ): Promise<T> {
   let lastErrors: string[] = [];
   let totalTokens = 0;
+  // Degrade gracefully if an attached image can't be processed by the model:
+  // drop the images and continue text-only (the widget can still show the
+  // image via its URL — the model just won't have "seen" it).
+  let useImages = images;
   for (let attempt = 0; attempt < 2; attempt++) {
     const prompt =
       attempt === 0
@@ -56,7 +68,21 @@ async function generateValidated<T>(
         : `${user}\n\nYour previous response was invalid. Fix these problems and return corrected JSON only:\n${lastErrors
             .map((e) => `- ${e}`)
             .join("\n")}`;
-    const { text, tokens } = await generateText({ system, user: prompt });
+    let text: string;
+    let tokens: number;
+    try {
+      ({ text, tokens } = await generateText({ system, user: prompt, images: useImages }));
+    } catch (err) {
+      if (useImages.length > 0) {
+        console.warn(
+          `[${step}] vision call failed (${(err as Error).message}) — retrying text-only`,
+        );
+        useImages = [];
+        attempt--; // don't consume a validation attempt on the image fallback
+        continue;
+      }
+      throw err;
+    }
     totalTokens += tokens;
 
     const json = extractJson(text);
@@ -100,7 +126,10 @@ export class Orchestrator {
     }
   }
 
-  async handleRequest(requestText: string): Promise<OrchestratorResult> {
+  async handleRequest(
+    requestText: string,
+    attachments: Attachment[] = [],
+  ): Promise<OrchestratorResult> {
     if (!llmAvailable()) {
       throw new Error(
         "ANTHROPIC_API_KEY is not set — the generative pipeline needs Claude. Add it to apps/server/.env.",
@@ -109,29 +138,40 @@ export class Orchestrator {
 
     const components = await this.db.listComponents();
     const capabilities = await this.db.listCapabilities();
+    // Load image attachments as vision blocks so the planner/component gen can
+    // actually see screenshots/photos (not just their filenames).
+    const images = await this.loadImages(attachments);
 
-    // Cache check (feature similarity via pg_trgm / trigram fallback).
-    const candidates = await this.db.findSimilarFeatures(requestText, 5);
-    const best = candidates[0];
-    if (best && best.similarity >= config.similarityThreshold) {
-      await this.log(requestText, "cache", true, true, 0, 0);
-      return {
-        status: "ok",
-        feature: best.feature,
-        cached: true,
-        pendingApprovals: [],
-      };
+    // Cache check — skip when files are attached (each upload is unique, so a
+    // prior text-similar feature would point at the wrong asset).
+    if (attachments.length === 0) {
+      const candidates = await this.db.findSimilarFeatures(requestText, 5);
+      const best = candidates[0];
+      if (best && best.similarity >= config.similarityThreshold) {
+        await this.log(requestText, "cache", true, true, 0, 0);
+        return { status: "ok", feature: best.feature, cached: true, pendingApprovals: [] };
+      }
     }
+    const candidates =
+      attachments.length === 0 ? await this.db.findSimilarFeatures(requestText, 5) : [];
 
-    // Plan.
-    const plan = await generateValidated<Plan>(
-      "planner",
-      plannerSystem(components, capabilities, candidates),
-      `User request: ${requestText}`,
-      validatePlan,
-      (tokens, retries, success) =>
-        void this.log(requestText, "plan", false, success, retries, tokens),
-    );
+    // Plan. A planner failure (e.g. model/API error) becomes an explained
+    // decline rather than a 500 — the app degrades gracefully.
+    let plan: Plan;
+    try {
+      plan = await generateValidated<Plan>(
+        "planner",
+        plannerSystem(components, capabilities, candidates, attachments),
+        `User request: ${requestText}`,
+        validatePlan,
+        (tokens, retries, success) =>
+          void this.log(requestText, "plan", false, success, retries, tokens),
+        images,
+      );
+    } catch (err) {
+      const technical = err instanceof Error ? err.message : String(err);
+      return { status: "declined", reason: await explainFailure(requestText, technical) };
+    }
 
     // Feasibility gate: the planner decided this can't be fulfilled here
     // (needs a key/account/impossible). Decline gracefully with its reason.
@@ -153,14 +193,25 @@ export class Orchestrator {
     // explained decline rather than a 500.
     try {
       const pendingApprovals = await this.runTier3(requestText, plan);
-      await this.runTier2(requestText, plan);
-      const feature = await this.runTier1(requestText, plan);
+      await this.runTier2(requestText, plan, attachments, images);
+      const feature = await this.runTier1(requestText, plan, attachments);
       return { status: "ok", feature, cached: false, pendingApprovals };
     } catch (err) {
       const technical = err instanceof Error ? err.message : String(err);
       const reason = await explainFailure(requestText, technical);
       return { status: "declined", reason };
     }
+  }
+
+  /** Reads image attachments from storage as base64 vision inputs. */
+  private async loadImages(attachments: Attachment[]): Promise<ImageInput[]> {
+    const images: ImageInput[] = [];
+    for (const a of attachments) {
+      if (attachmentKind(a.mimeType) !== "image") continue;
+      const upload = await this.db.getUpload(a.id);
+      if (upload) images.push({ mediaType: upload.mimeType, dataBase64: upload.dataBase64 });
+    }
+    return images;
   }
 
   /* -------------------- Tier 3 -------------------- */
@@ -198,18 +249,24 @@ export class Orchestrator {
 
   /* -------------------- Tier 2 -------------------- */
 
-  private async runTier2(requestText: string, plan: Plan): Promise<void> {
+  private async runTier2(
+    requestText: string,
+    plan: Plan,
+    attachments: Attachment[],
+    images: ImageInput[],
+  ): Promise<void> {
     if (plan.needsComponents.length === 0) return;
     const capabilities = await this.db.listCapabilities();
 
     for (const need of plan.needsComponents) {
       const spec = await generateValidated<ComponentSpec & { builtJs: string }>(
         "tier2",
-        tier2System(capabilities),
-        `User request: ${requestText}\n\nGenerate this component: id "${need.id}" — ${need.description}\nUse version 1. If it needs external data, call it through useCapability with one of the available capability keys.`,
+        tier2System(capabilities, attachments),
+        `User request: ${requestText}\n\nGenerate this component: id "${need.id}" — ${need.description}\nUse version 1. If it needs external data, call it through useCapability with one of the available capability keys. If it renders an attachment, take the url as a prop and use it directly in src/href.`,
         validateComponentSpec,
         (tokens, retries, success) =>
           void this.log(requestText, "tier2", false, success, retries, tokens),
+        images,
       );
       spec.version = 1;
       const key = componentKey(spec);
@@ -227,15 +284,25 @@ export class Orchestrator {
 
   /* -------------------- Tier 1 -------------------- */
 
-  private async runTier1(requestText: string, plan: Plan): Promise<FeatureRow> {
+  private async runTier1(
+    requestText: string,
+    plan: Plan,
+    attachments: Attachment[],
+  ): Promise<FeatureRow> {
     const components = await this.db.listComponents();
     const capabilities = await this.db.listCapabilities();
     const componentKeys = new Set(components.map((c) => c.key));
 
+    const attachNote =
+      attachments.length > 0
+        ? `\n\nAttachment URLs to wire in:\n${attachments
+            .map((a) => `- ${a.filename}: ${a.url}`)
+            .join("\n")}`
+        : "";
     const def = await generateValidated<WidgetDefinition>(
       "tier1",
-      tier1System(components, capabilities),
-      `User request: ${requestText}\n\nCompose this widget: ${plan.widgetPlan}`,
+      tier1System(components, capabilities, attachments),
+      `User request: ${requestText}\n\nCompose this widget: ${plan.widgetPlan}${attachNote}`,
       (raw) => validateWidgetDefinition(raw, componentKeys),
       (tokens, retries, success) =>
         void this.log(requestText, "tier1", false, success, retries, tokens),

@@ -1,9 +1,11 @@
 import {
+  type Attachment,
   BUILTIN_COMPONENTS,
   CapabilitySpecSchema,
   ComponentSpecSchema,
   PlanSchema,
   WidgetDefinitionSchema,
+  attachmentKind,
   jsonSchemaOf,
 } from "@myday/schema";
 import type { CapabilityRow, ComponentRow, SimilarFeature } from "../db";
@@ -57,6 +59,26 @@ function componentIndex(components: ComponentRow[]): string {
     .join("\n");
 }
 
+/** Describes request attachments + how a widget should surface them. */
+function attachmentSection(attachments: Attachment[]): string {
+  if (attachments.length === 0) return "";
+  const lines = attachments
+    .map((a) => `- ${attachmentKind(a.mimeType)} "${a.filename}" (${a.mimeType}) → url: ${a.url}`)
+    .join("\n");
+  return `
+The user attached these files. Their URLs are same-origin and can be used
+DIRECTLY as src/href in a component — no capability, no fetch, no key needed:
+${lines}
+
+Guidance:
+- image → show it with an Image component: <img src={url} .../>
+- audio → an audio player: <audio controls src={url} />
+- video → a video player: <video controls src={url} />
+- other files → a download/open link: <a href={url} download>filename</a>
+Build (or reuse) the minimal generated component needed and pass the url as a prop.
+`.trim();
+}
+
 function capabilityIndex(capabilities: CapabilityRow[]): string {
   if (capabilities.length === 0) return "(none yet)";
   return capabilities
@@ -80,7 +102,9 @@ export function plannerSystem(
   components: ComponentRow[],
   capabilities: CapabilityRow[],
   cacheCandidates: SimilarFeature[],
+  attachments: Attachment[] = [],
 ): string {
+  const attachSection = attachmentSection(attachments);
   const candidates =
     cacheCandidates.length === 0
       ? "(none)"
@@ -109,8 +133,9 @@ ${capabilityIndex(capabilities)}
 
 Cached features similar to this request:
 ${candidates}
-
+${attachSection ? `\n${attachSection}\n` : ""}
 Rules:
+- If the user attached files, the request IS feasible via those attachment URLs (they need no key) — build a widget that displays/plays/links them; do not decline for lack of an API.
 - FEASIBILITY GATE — decide FIRST. A request is only feasible if it can be built from built-in primitives, generated components, and keyless public APIs (no API key, no login, no private/account data) running inside the sandbox. If it fundamentally requires a private/authenticated API key, access to the user's accounts or devices, real-time data with no keyless source, or anything impossible in a browser+sandbox, set "feasible": false, leave the other build fields empty, and write "declineReason": a clear, friendly, SPECIFIC explanation of the exact reason (name what it would need and why this app can't do it) followed by a short suggestion to try something else. When feasible, set "feasible": true and "declineReason": "".
 - If a cache candidate clearly satisfies the request, set "cacheHit" to its id.
 - Only add needsComponents / needsCapabilities entries when nothing existing (built-in or generated) fits.
@@ -153,10 +178,15 @@ ${js(CapabilitySpecSchema)}`;
 /* Tier 2 — component generation                                       */
 /* ------------------------------------------------------------------ */
 
-export function tier2System(capabilities: CapabilityRow[]): string {
+export function tier2System(
+  capabilities: CapabilityRow[],
+  attachments: Attachment[] = [],
+): string {
+  const attachSection = attachmentSection(attachments);
   return `${CONTEXT}
 
 You are the TIER 2 generator: you write a new single-file React component that the client will dynamically import at runtime.
+${attachSection ? `\n${attachSection}\n` : ""}
 
 Source constraints (enforced by static checks — violations are rejected):
 - TypeScript/TSX, ONE file, exactly one default-exported function component.
@@ -184,10 +214,13 @@ ${js(ComponentSpecSchema)}`;
 export function tier1System(
   components: ComponentRow[],
   capabilities: CapabilityRow[],
+  attachments: Attachment[] = [],
 ): string {
+  const attachSection = attachmentSection(attachments);
   return `${CONTEXT}
 
 You are the TIER 1 composer: you produce the widget JSON (WidgetDefinition) the client renders.
+${attachSection ? `\n${attachSection}\nPass attachment URLs as props to the generated component that renders them.\n` : ""}
 
 ${BUILTIN_DOC}
 

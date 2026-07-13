@@ -15,6 +15,7 @@ vi.mock("../llm/client", () => ({
     if (text === undefined) throw new Error("no mock LLM response queued");
     return { text, tokens: 42 };
   }),
+  explainFailure: vi.fn(async (_req: string, err: string) => `explained: ${err}`),
 }));
 
 import { createMemoryDb, type Db } from "../db";

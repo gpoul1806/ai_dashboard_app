@@ -70,6 +70,15 @@ create table if not exists widget_data (
   updated_at timestamptz not null default now()
 );
 
+create table if not exists uploads (
+  id          text primary key,
+  filename    text not null,
+  mime_type   text not null,
+  size        int not null default 0,
+  data_base64 text not null,
+  created_at  timestamptz not null default now()
+);
+
 create table if not exists generation_log (
   id           bigint generated always as identity primary key,
   request_text text not null,

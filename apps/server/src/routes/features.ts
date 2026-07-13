@@ -1,7 +1,11 @@
+import { AttachmentSchema } from "@myday/schema";
 import { Router } from "express";
+import { z } from "zod";
 import type { Db, FeatureRow } from "../db";
 import { HttpError } from "../config";
 import type { Orchestrator } from "../orchestrator";
+
+const AttachmentsSchema = z.array(AttachmentSchema).max(10).default([]);
 
 function toApi(feature: FeatureRow) {
   return {
@@ -30,8 +34,18 @@ export function featuresRouter(db: Db, orchestrator: Orchestrator): Router {
   router.post("/request", async (req, res, next) => {
     try {
       const text = String((req.body as { text?: unknown })?.text ?? "").trim();
-      if (!text) throw new HttpError(400, "request text is required");
-      const result = await orchestrator.handleRequest(text);
+      const parsedAttachments = AttachmentsSchema.safeParse(
+        (req.body as { attachments?: unknown })?.attachments ?? [],
+      );
+      if (!parsedAttachments.success) throw new HttpError(400, "invalid attachments");
+      const attachments = parsedAttachments.data;
+      if (!text && attachments.length === 0) {
+        throw new HttpError(400, "request text or an attachment is required");
+      }
+      const result = await orchestrator.handleRequest(
+        text || "Build a widget that displays the attached file(s).",
+        attachments,
+      );
       // A declined request is a normal (200) outcome, not an error — the client
       // shows a toast + the LLM's collapsible explanation.
       if (result.status === "declined") {

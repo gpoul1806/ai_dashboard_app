@@ -1,4 +1,4 @@
-import React, { useCallback, useEffect, useState } from "react";
+import React, { useCallback, useEffect, useRef, useState } from "react";
 import {
   api,
   type CapabilityRecord,
@@ -83,6 +83,31 @@ export default function App() {
   const [error, setError] = useState<string | null>(null);
   const [toast, setToast] = useState<string | null>(null);
   const [declined, setDeclined] = useState<Declined | null>(null);
+  // Files attached to the request, kept locally until submit (previewUrl is an
+  // object URL for thumbnails; the real upload happens on submit).
+  const [pending, setPending] = useState<{ file: File; previewUrl: string }[]>([]);
+  const [dragOver, setDragOver] = useState(false);
+  const fileInputRef = useRef<HTMLInputElement>(null);
+
+  const addFiles = useCallback((files: FileList | File[] | null) => {
+    if (!files) return;
+    const arr = Array.from(files).slice(0, 10);
+    if (arr.length === 0) return;
+    setPending((prev) =>
+      [...prev, ...arr.map((file) => ({ file, previewUrl: URL.createObjectURL(file) }))].slice(
+        0,
+        10,
+      ),
+    );
+  }, []);
+
+  const removePending = useCallback((index: number) => {
+    setPending((prev) => {
+      const target = prev[index];
+      if (target) URL.revokeObjectURL(target.previewUrl);
+      return prev.filter((_, i) => i !== index);
+    });
+  }, []);
 
   const refresh = useCallback(async () => {
     const [f, c] = await Promise.all([api.listFeatures(), api.listCapabilities()]);
@@ -96,13 +121,19 @@ export default function App() {
 
   const submit = useCallback(async () => {
     const request = text.trim();
-    if (!request || busy) return;
+    if ((!request && pending.length === 0) || busy) return;
     setBusy(true);
     setError(null);
     setDeclined(null);
-    setStatus("Thinking… the orchestrator is planning and generating (this can take a minute).");
+    setStatus(
+      pending.length > 0
+        ? "Uploading attachments and generating…"
+        : "Thinking… the orchestrator is planning and generating (this can take a minute).",
+    );
     try {
-      const result = await api.requestFeature(request);
+      // Upload any attached files first, then send their metadata with the request.
+      const attachments = await Promise.all(pending.map((p) => api.uploadFile(p.file)));
+      const result = await api.requestFeature(request, attachments);
       if (result.declined) {
         // Not an error — a graceful, explained decline.
         setStatus(null);
@@ -111,6 +142,8 @@ export default function App() {
         return;
       }
       setText("");
+      pending.forEach((p) => URL.revokeObjectURL(p.previewUrl));
+      setPending([]);
       await refresh();
       if (result.pendingApprovals.length > 0) {
         setStatus(
@@ -129,7 +162,7 @@ export default function App() {
     } finally {
       setBusy(false);
     }
-  }, [text, busy, refresh]);
+  }, [text, pending, busy, refresh]);
 
   const approve = useCallback(
     async (key: string) => {
@@ -146,18 +179,85 @@ export default function App() {
     <div className="app">
       <header className="app-header">
         <h1>My Day</h1>
-        <div className="ask">
+        <div
+          className={`ask ${dragOver ? "drag-over" : ""}`}
+          onDragOver={(e) => {
+            e.preventDefault();
+            setDragOver(true);
+          }}
+          onDragLeave={() => setDragOver(false)}
+          onDrop={(e) => {
+            e.preventDefault();
+            setDragOver(false);
+            addFiles(e.dataTransfer.files);
+          }}
+        >
           <input
+            type="file"
+            multiple
+            accept="*/*"
+            ref={fileInputRef}
+            style={{ display: "none" }}
+            onChange={(e) => {
+              addFiles(e.target.files);
+              e.target.value = "";
+            }}
+          />
+          <button
+            className="attach-btn"
+            title="Attach images, screenshots, audio, or any file"
+            onClick={() => fileInputRef.current?.click()}
+            disabled={busy}
+          >
+            📎
+          </button>
+          <input
+            className="ask-text"
             value={text}
-            placeholder="Ask for any feature… e.g. “a todo list” or “a cat gif top-right”"
+            placeholder="Ask for any feature… e.g. “a todo list”, “a cat gif top-right”, or attach a file"
             onChange={(e) => setText(e.target.value)}
             onKeyDown={(e) => e.key === "Enter" && submit()}
+            onPaste={(e) => {
+              const files = Array.from(e.clipboardData.files);
+              if (files.length > 0) {
+                e.preventDefault();
+                addFiles(files);
+              }
+            }}
             disabled={busy}
           />
-          <button onClick={submit} disabled={busy || !text.trim()}>
+          <button onClick={submit} disabled={busy || (!text.trim() && pending.length === 0)}>
             {busy ? "Generating…" : "Add"}
           </button>
         </div>
+
+        {pending.length > 0 && (
+          <div className="attachments">
+            {pending.map((p, i) => (
+              <div className="attach-chip" key={i}>
+                {p.file.type.startsWith("image/") ? (
+                  <img src={p.previewUrl} alt={p.file.name} className="attach-thumb" />
+                ) : (
+                  <span className="attach-icon">
+                    {p.file.type.startsWith("audio/")
+                      ? "🎵"
+                      : p.file.type.startsWith("video/")
+                        ? "🎬"
+                        : "📄"}
+                  </span>
+                )}
+                <span className="attach-name">{p.file.name}</span>
+                <button
+                  className="attach-remove"
+                  onClick={() => removePending(i)}
+                  aria-label={`Remove ${p.file.name}`}
+                >
+                  ×
+                </button>
+              </div>
+            ))}
+          </div>
+        )}
         {status && <p className="status">{status}</p>}
         {error && <p className="error">{error}</p>}
 

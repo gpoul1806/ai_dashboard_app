@@ -8,6 +8,7 @@ import { componentsRouter } from "./routes/components";
 import { dataRouter } from "./routes/data";
 import { dynRouter } from "./routes/dyn";
 import { featuresRouter } from "./routes/features";
+import { uploadsRouter } from "./routes/uploads";
 import type { SandboxRuntime } from "./sandbox";
 
 export function createApp(deps: {
@@ -18,7 +19,8 @@ export function createApp(deps: {
   const { db, orchestrator, sandbox } = deps;
   const app = express();
   app.use(cors());
-  app.use(express.json({ limit: "1mb" }));
+  // Limit accommodates base64-encoded file attachments (uploads route caps at 20 MB/file).
+  app.use(express.json({ limit: "30mb" }));
 
   app.get("/api/health", (_req, res) => {
     res.json({ ok: true, db: db.kind, sandbox: sandbox.engine });
@@ -28,6 +30,7 @@ export function createApp(deps: {
   app.use("/api/components", componentsRouter(db));
   app.use("/api/capabilities", capabilitiesRouter(db, sandbox));
   app.use("/api/data", dataRouter(db));
+  app.use("/api/uploads", uploadsRouter(db));
   app.use("/api/dyn", dynRouter(db, sandbox));
 
   // Centralized error handler → JSON { error }.

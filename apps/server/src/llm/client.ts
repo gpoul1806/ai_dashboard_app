@@ -19,16 +19,43 @@ export interface LlmResult {
   tokens: number;
 }
 
+export interface ImageInput {
+  mediaType: string;
+  dataBase64: string;
+}
+
 export async function generateText(opts: {
   system: string;
   user: string;
   maxTokens?: number;
+  /** Images attached to the request, sent to Claude as vision blocks. */
+  images?: ImageInput[];
 }): Promise<LlmResult> {
+  const images = opts.images ?? [];
+  const content =
+    images.length === 0
+      ? opts.user
+      : [
+          ...images.map((img) => ({
+            type: "image" as const,
+            source: {
+              type: "base64" as const,
+              media_type: img.mediaType as
+                | "image/jpeg"
+                | "image/png"
+                | "image/gif"
+                | "image/webp",
+              data: img.dataBase64,
+            },
+          })),
+          { type: "text" as const, text: opts.user },
+        ];
+
   const response = await getClient().messages.create({
     model: config.model,
     max_tokens: opts.maxTokens ?? 16000,
     system: opts.system,
-    messages: [{ role: "user", content: opts.user }],
+    messages: [{ role: "user", content }],
   });
   const text = response.content
     .filter((block) => block.type === "text")

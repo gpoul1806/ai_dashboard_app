@@ -124,6 +124,27 @@ export function capabilityKey(spec: Pick<CapabilitySpec, "id" | "version">): str
 }
 
 /* ------------------------------------------------------------------ */
+/* Attachments (files/images/audio dropped into the request bar)        */
+/* ------------------------------------------------------------------ */
+
+export const AttachmentSchema = z.object({
+  id: z.string().min(1),
+  filename: z.string().min(1),
+  mimeType: z.string().min(1),
+  size: z.number().int().nonnegative(),
+  /** Same-origin URL the shell/generated components can use as src/href. */
+  url: z.string().min(1),
+});
+export type Attachment = z.infer<typeof AttachmentSchema>;
+
+export function attachmentKind(mimeType: string): "image" | "audio" | "video" | "file" {
+  if (mimeType.startsWith("image/")) return "image";
+  if (mimeType.startsWith("audio/")) return "audio";
+  if (mimeType.startsWith("video/")) return "video";
+  return "file";
+}
+
+/* ------------------------------------------------------------------ */
 /* Orchestrator plan                                                   */
 /* ------------------------------------------------------------------ */
 

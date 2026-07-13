@@ -1,4 +1,6 @@
-import type { WidgetDefinition } from "@myday/schema";
+import type { Attachment, WidgetDefinition } from "@myday/schema";
+
+export type { Attachment } from "@myday/schema";
 
 export interface DataRow {
   id: string;
@@ -66,11 +68,35 @@ async function http<T>(path: string, init?: RequestInit): Promise<T> {
   return body as T;
 }
 
+/** Reads a File as base64 (strips the data: URL prefix). */
+function fileToBase64(file: File): Promise<string> {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onerror = () => reject(reader.error ?? new Error("file read failed"));
+    reader.onload = () => {
+      const result = String(reader.result);
+      resolve(result.slice(result.indexOf(",") + 1));
+    };
+    reader.readAsDataURL(file);
+  });
+}
+
 export const api = {
-  requestFeature(text: string): Promise<RequestFeatureResult> {
+  async uploadFile(file: File): Promise<Attachment> {
+    const dataBase64 = await fileToBase64(file);
+    return http<Attachment>("/api/uploads", {
+      method: "POST",
+      body: JSON.stringify({
+        filename: file.name || "file",
+        mimeType: file.type || "application/octet-stream",
+        dataBase64,
+      }),
+    });
+  },
+  requestFeature(text: string, attachments: Attachment[] = []): Promise<RequestFeatureResult> {
     return http("/api/features/request", {
       method: "POST",
-      body: JSON.stringify({ text }),
+      body: JSON.stringify({ text, attachments }),
     });
   },
   listFeatures(): Promise<FeatureRecord[]> {
