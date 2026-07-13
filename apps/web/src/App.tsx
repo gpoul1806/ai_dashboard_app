@@ -88,6 +88,8 @@ export default function App() {
   const [pending, setPending] = useState<{ file: File; previewUrl: string }[]>([]);
   const [dragOver, setDragOver] = useState(false);
   const fileInputRef = useRef<HTMLInputElement>(null);
+  // Controls the in-flight request so it can be cancelled mid-generation.
+  const abortRef = useRef<AbortController | null>(null);
 
   const addFiles = useCallback((files: FileList | File[] | null) => {
     if (!files) return;
@@ -130,10 +132,14 @@ export default function App() {
         ? "Uploading attachments and generating…"
         : "Thinking… the orchestrator is planning and generating (this can take a minute).",
     );
+    const controller = new AbortController();
+    abortRef.current = controller;
     try {
       // Upload any attached files first, then send their metadata with the request.
-      const attachments = await Promise.all(pending.map((p) => api.uploadFile(p.file)));
-      const result = await api.requestFeature(request, attachments);
+      const attachments = await Promise.all(
+        pending.map((p) => api.uploadFile(p.file, controller.signal)),
+      );
+      const result = await api.requestFeature(request, attachments, controller.signal);
       if (result.declined) {
         // Not an error — a graceful, explained decline.
         setStatus(null);
@@ -157,12 +163,21 @@ export default function App() {
         );
       }
     } catch (e) {
-      setError(String((e as Error)?.message ?? e));
-      setStatus(null);
+      if (controller.signal.aborted || (e as Error)?.name === "AbortError") {
+        setStatus("Request cancelled.");
+      } else {
+        setError(String((e as Error)?.message ?? e));
+        setStatus(null);
+      }
     } finally {
+      abortRef.current = null;
       setBusy(false);
     }
   }, [text, pending, busy, refresh]);
+
+  const cancel = useCallback(() => {
+    abortRef.current?.abort();
+  }, []);
 
   const approve = useCallback(
     async (key: string) => {
@@ -242,6 +257,11 @@ export default function App() {
           <button onClick={submit} disabled={busy || (!text.trim() && pending.length === 0)}>
             {busy ? "Generating…" : "Add"}
           </button>
+          {busy && (
+            <button className="cancel-btn" onClick={cancel} title="Cancel this request">
+              Cancel
+            </button>
+          )}
         </div>
 
         {pending.length > 0 && (

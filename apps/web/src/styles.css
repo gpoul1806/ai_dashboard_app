@@ -63,6 +63,18 @@ body {
 }
 .attach-btn:disabled { opacity: 0.5; cursor: default; }
 
+.cancel-btn {
+  flex: 0 0 auto;
+  padding: 10px 16px;
+  border: 1px solid #c9857a;
+  border-radius: 8px;
+  background: #fff;
+  color: #a33;
+  font-size: 15px;
+  cursor: pointer;
+}
+.cancel-btn:hover { background: #fbeceb; }
+
 .attachments {
   display: flex;
   flex-wrap: wrap;

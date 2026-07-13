@@ -82,7 +82,7 @@ function fileToBase64(file: File): Promise<string> {
 }
 
 export const api = {
-  async uploadFile(file: File): Promise<Attachment> {
+  async uploadFile(file: File, signal?: AbortSignal): Promise<Attachment> {
     const dataBase64 = await fileToBase64(file);
     return http<Attachment>("/api/uploads", {
       method: "POST",
@@ -91,12 +91,18 @@ export const api = {
         mimeType: file.type || "application/octet-stream",
         dataBase64,
       }),
+      signal,
     });
   },
-  requestFeature(text: string, attachments: Attachment[] = []): Promise<RequestFeatureResult> {
+  requestFeature(
+    text: string,
+    attachments: Attachment[] = [],
+    signal?: AbortSignal,
+  ): Promise<RequestFeatureResult> {
     return http("/api/features/request", {
       method: "POST",
       body: JSON.stringify({ text, attachments }),
+      signal,
     });
   },
   listFeatures(): Promise<FeatureRecord[]> {

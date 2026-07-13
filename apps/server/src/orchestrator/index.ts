@@ -54,6 +54,7 @@ async function generateValidated<T>(
   validate: (raw: unknown) => Validated<T> | Promise<Validated<T>>,
   onLog: (tokens: number, retries: number, success: boolean) => void,
   images: ImageInput[] = [],
+  signal?: AbortSignal,
 ): Promise<T> {
   let lastErrors: string[] = [];
   let totalTokens = 0;
@@ -71,8 +72,9 @@ async function generateValidated<T>(
     let text: string;
     let tokens: number;
     try {
-      ({ text, tokens } = await generateText({ system, user: prompt, images: useImages }));
+      ({ text, tokens } = await generateText({ system, user: prompt, images: useImages, signal }));
     } catch (err) {
+      if (signal?.aborted) throw err; // client cancelled — propagate, don't retry
       if (useImages.length > 0) {
         console.warn(
           `[${step}] vision call failed (${(err as Error).message}) — retrying text-only`,
@@ -129,6 +131,7 @@ export class Orchestrator {
   async handleRequest(
     requestText: string,
     attachments: Attachment[] = [],
+    signal?: AbortSignal,
   ): Promise<OrchestratorResult> {
     if (!llmAvailable()) {
       throw new Error(
@@ -167,8 +170,10 @@ export class Orchestrator {
         (tokens, retries, success) =>
           void this.log(requestText, "plan", false, success, retries, tokens),
         images,
+        signal,
       );
     } catch (err) {
+      if (signal?.aborted) throw err; // client cancelled — let the route drop it
       const technical = err instanceof Error ? err.message : String(err);
       return { status: "declined", reason: await explainFailure(requestText, technical) };
     }
@@ -192,11 +197,12 @@ export class Orchestrator {
     // failure (e.g. no keyless capability survives validation+retry) becomes an
     // explained decline rather than a 500.
     try {
-      const pendingApprovals = await this.runTier3(requestText, plan);
-      await this.runTier2(requestText, plan, attachments, images);
-      const feature = await this.runTier1(requestText, plan, attachments);
+      const pendingApprovals = await this.runTier3(requestText, plan, signal);
+      await this.runTier2(requestText, plan, attachments, images, signal);
+      const feature = await this.runTier1(requestText, plan, attachments, signal);
       return { status: "ok", feature, cached: false, pendingApprovals };
     } catch (err) {
+      if (signal?.aborted) throw err; // client cancelled — let the route drop it
       const technical = err instanceof Error ? err.message : String(err);
       const reason = await explainFailure(requestText, technical);
       return { status: "declined", reason };
@@ -216,7 +222,11 @@ export class Orchestrator {
 
   /* -------------------- Tier 3 -------------------- */
 
-  private async runTier3(requestText: string, plan: Plan): Promise<string[]> {
+  private async runTier3(
+    requestText: string,
+    plan: Plan,
+    signal?: AbortSignal,
+  ): Promise<string[]> {
     const pendingApprovals: string[] = [];
     for (const need of plan.needsCapabilities) {
       const spec = await generateValidated<CapabilitySpec>(
@@ -226,6 +236,8 @@ export class Orchestrator {
         validateCapabilitySpec,
         (tokens, retries, success) =>
           void this.log(requestText, "tier3", false, success, retries, tokens),
+        [],
+        signal,
       );
       spec.version = 1;
       const key = capabilityKey(spec);
@@ -254,6 +266,7 @@ export class Orchestrator {
     plan: Plan,
     attachments: Attachment[],
     images: ImageInput[],
+    signal?: AbortSignal,
   ): Promise<void> {
     if (plan.needsComponents.length === 0) return;
     const capabilities = await this.db.listCapabilities();
@@ -267,6 +280,7 @@ export class Orchestrator {
         (tokens, retries, success) =>
           void this.log(requestText, "tier2", false, success, retries, tokens),
         images,
+        signal,
       );
       spec.version = 1;
       const key = componentKey(spec);
@@ -288,6 +302,7 @@ export class Orchestrator {
     requestText: string,
     plan: Plan,
     attachments: Attachment[],
+    signal?: AbortSignal,
   ): Promise<FeatureRow> {
     const components = await this.db.listComponents();
     const capabilities = await this.db.listCapabilities();
@@ -306,6 +321,8 @@ export class Orchestrator {
       (raw) => validateWidgetDefinition(raw, componentKeys),
       (tokens, retries, success) =>
         void this.log(requestText, "tier1", false, success, retries, tokens),
+      [],
+      signal,
     );
 
     const id = `${slugify(def.id || def.name)}-${Date.now().toString(36)}`;

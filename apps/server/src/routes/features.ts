@@ -42,22 +42,38 @@ export function featuresRouter(db: Db, orchestrator: Orchestrator): Router {
       if (!text && attachments.length === 0) {
         throw new HttpError(400, "request text or an attachment is required");
       }
-      const result = await orchestrator.handleRequest(
-        text || "Build a widget that displays the attached file(s).",
-        attachments,
-      );
-      // A declined request is a normal (200) outcome, not an error — the client
-      // shows a toast + the LLM's collapsible explanation.
-      if (result.status === "declined") {
-        res.json({ declined: true, reason: result.reason });
-        return;
+
+      // Cancellation: when the client aborts the fetch, the connection closes.
+      // Abort the request-scoped signal so the orchestrator stops the in-flight
+      // Claude calls (and stops spending tokens) instead of running to completion.
+      const ac = new AbortController();
+      const onClose = () => ac.abort();
+      req.on("close", onClose);
+
+      try {
+        const result = await orchestrator.handleRequest(
+          text || "Build a widget that displays the attached file(s).",
+          attachments,
+          ac.signal,
+        );
+        // A declined request is a normal (200) outcome, not an error — the
+        // client shows a toast + the LLM's collapsible explanation.
+        if (result.status === "declined") {
+          res.json({ declined: true, reason: result.reason });
+        } else {
+          res.json({
+            declined: false,
+            feature: toApi(result.feature),
+            cached: result.cached,
+            pendingApprovals: result.pendingApprovals,
+          });
+        }
+      } catch (err) {
+        if (ac.signal.aborted) return; // client cancelled — nothing to send back
+        throw err;
+      } finally {
+        req.off("close", onClose);
       }
-      res.json({
-        declined: false,
-        feature: toApi(result.feature),
-        cached: result.cached,
-        pendingApprovals: result.pendingApprovals,
-      });
     } catch (err) {
       next(err);
     }

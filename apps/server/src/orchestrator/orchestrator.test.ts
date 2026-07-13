@@ -10,7 +10,12 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 const responses: string[] = [];
 vi.mock("../llm/client", () => ({
   llmAvailable: () => true,
-  generateText: vi.fn(async () => {
+  generateText: vi.fn(async (opts: { signal?: AbortSignal }) => {
+    if (opts?.signal?.aborted) {
+      const err = new Error("Request was aborted");
+      err.name = "AbortError";
+      throw err;
+    }
     const text = responses.shift();
     if (text === undefined) throw new Error("no mock LLM response queued");
     return { text, tokens: 42 };
@@ -86,6 +91,17 @@ describe("Orchestrator — Tier 1 composition", () => {
     expect(result.status).toBe("ok");
     if (result.status !== "ok") return;
     expect(result.feature.definition.root.type).toBe("Text");
+  });
+
+  it("propagates cancellation (aborted signal) instead of building or declining", async () => {
+    const ac = new AbortController();
+    ac.abort();
+    // No responses queued: the aborted signal makes generateText throw before
+    // any generation. handleRequest must reject (route drops it), not return a
+    // declined/ok result, and nothing should be persisted.
+    await expect(orchestrator.handleRequest("build me anything", [], ac.signal)).rejects.toThrow();
+    expect(await db.listFeatures()).toHaveLength(0);
+    expect(await db.listComponents()).toHaveLength(0);
   });
 
   it("declines an infeasible request with the planner's reason (no widget built)", async () => {

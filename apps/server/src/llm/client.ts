@@ -30,6 +30,8 @@ export async function generateText(opts: {
   maxTokens?: number;
   /** Images attached to the request, sent to Claude as vision blocks. */
   images?: ImageInput[];
+  /** Aborts the underlying HTTP request when the client cancels. */
+  signal?: AbortSignal;
 }): Promise<LlmResult> {
   const images = opts.images ?? [];
   const content =
@@ -51,12 +53,15 @@ export async function generateText(opts: {
           { type: "text" as const, text: opts.user },
         ];
 
-  const response = await getClient().messages.create({
-    model: config.model,
-    max_tokens: opts.maxTokens ?? 16000,
-    system: opts.system,
-    messages: [{ role: "user", content }],
-  });
+  const response = await getClient().messages.create(
+    {
+      model: config.model,
+      max_tokens: opts.maxTokens ?? 16000,
+      system: opts.system,
+      messages: [{ role: "user", content }],
+    },
+    { signal: opts.signal },
+  );
   const text = response.content
     .filter((block) => block.type === "text")
     .map((block) => block.text)
