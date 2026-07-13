@@ -65,8 +65,11 @@ export const WidgetDefinitionSchema = z.object({
   /** Capability keys the widget calls through /api/dyn, e.g. ["giphy-search@1"]. */
   requiresCapabilities: z.array(z.string()).default([]),
   dataSchema: z.record(z.string(), DataFieldSchema).optional(),
-  /** pinned widgets render in the Overlay slot of the shell. */
-  placement: z.enum(["flow", "pinned"]).default("flow"),
+  /**
+   * flow → a card in the dashboard grid; pinned → a small floating Overlay;
+   * background → a full-viewport layer behind all widgets (non-interactive).
+   */
+  placement: z.enum(["flow", "pinned", "background"]).default("flow"),
 });
 export type WidgetDefinition = z.infer<typeof WidgetDefinitionSchema>;
 

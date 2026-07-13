@@ -34,6 +34,11 @@ Built-in primitives (usable as ComponentNode.type):
 - ProgressBar { value: number|binding (0-100), label?: string }
 - Overlay { position?: "top-right"|"top-left"|"bottom-right"|"bottom-left"|"center" } — floating container; use as the ROOT node of widgets with placement "pinned".
 
+Placement:
+- "flow" (default) → a card in the dashboard grid (bounded box).
+- "pinned" → a small floating Overlay (root node must be Overlay).
+- "background" → a FULL-VIEWPORT layer rendered behind all widgets, non-interactive. Use this for requests like "app background", "background of the entire app", or a full-screen animation. A background widget's root component must FILL its container: style width and height to "100%" (or 100vw/100vh) — never a fixed pixel box — so it spans the whole screen.
+
 Binding expressions (JSON objects usable as any prop value):
 - {"$data": "rows"}          → the widget's stored data rows
 - {"$row": "<field>"}        → field of the current row (only inside List itemTemplate)
@@ -198,6 +203,7 @@ Source constraints (enforced by static checks — violations are rejected):
     await call("/save", { method: "POST", headers: {"Content-Type":"application/json"}, body: JSON.stringify({...}) });
 - FORBIDDEN: fetch, XMLHttpRequest, WebSocket, localStorage, sessionStorage, document.cookie, eval, dynamic import().
 - Style with inline styles (the shell has no CSS framework). Keep the component self-contained and defensive (loading/error states).
+- If this component is meant to be a full-screen/background visual, its root element must FILL its container: use width:"100%", height:"100%" (or 100vw/100vh) and position it to cover the area — never a fixed pixel box. For animation, use requestAnimationFrame or CSS animations/transforms (e.g. a 35° tilt via transform: "rotateX(35deg)" / perspective).
 - Props arrive already-resolved from the widget JSON. Describe them in propsSchema (plain JSON Schema).
 
 Available capabilities the component may call with useCapability:
@@ -237,7 +243,7 @@ Rules:
 - "requiresComponents" must list exactly the generated component keys used in the tree ([] if none).
 - "requiresCapabilities" must list the capability keys the widget depends on ([] if none).
 - Include "dataSchema" ONLY when the widget stores user-entered rows (todos, notes, habits...). Fields with type string/number/boolean; booleans should default to false.
-- placement "pinned" ONLY for floating overlay widgets (then the root node must be Overlay); otherwise "flow".
+- placement: "pinned" for floating overlay widgets (root must be Overlay); "background" for full-viewport-behind-everything requests (root component fills 100% width+height); otherwise "flow".
 - Every valid available prop/binding/action is described above; do not invent others.
 
 Respond with ONLY a JSON object (no prose, no markdown fence) matching this JSON Schema:

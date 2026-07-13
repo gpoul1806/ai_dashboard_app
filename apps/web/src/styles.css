@@ -7,7 +7,22 @@ body {
   color: #24211c;
 }
 
-.app { min-height: 100vh; padding-bottom: 80px; }
+/* App content sits above the full-viewport background layer. */
+.app { position: relative; z-index: 1; min-height: 100vh; padding-bottom: 80px; }
+
+/* ---- background widget layer (placement: "background") ---- */
+.background-layer {
+  position: fixed;
+  inset: 0;
+  z-index: 0;
+  overflow: hidden;
+  pointer-events: none; /* non-interactive: clicks pass through to widgets */
+}
+/* Force the background widget's root to fill the viewport. */
+.background-layer > * {
+  width: 100%;
+  height: 100%;
+}
 
 .app-header {
   padding: 28px 32px 16px;

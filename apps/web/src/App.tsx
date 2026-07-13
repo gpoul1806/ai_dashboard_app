@@ -172,11 +172,24 @@ export default function App() {
     [refresh],
   );
 
-  const flowFeatures = features.filter((f) => f.definition.placement !== "pinned");
+  const backgroundFeatures = features.filter((f) => f.definition.placement === "background");
   const pinnedFeatures = features.filter((f) => f.definition.placement === "pinned");
+  const flowFeatures = features.filter(
+    (f) =>
+      f.definition.placement !== "pinned" && f.definition.placement !== "background",
+  );
 
   return (
-    <div className="app">
+    <>
+      {/* Full-viewport layer behind the app for "background" widgets. */}
+      {backgroundFeatures.length > 0 && (
+        <div className="background-layer">
+          {backgroundFeatures.map((f) => (
+            <WidgetHost key={f.id} feature={f} />
+          ))}
+        </div>
+      )}
+      <div className="app">
       <header className="app-header">
         <h1>My Day</h1>
         <div
@@ -302,6 +315,7 @@ export default function App() {
       </div>
 
       <DevPanel capabilities={capabilities} onApprove={approve} />
-    </div>
+      </div>
+    </>
   );
 }
