@@ -104,6 +104,72 @@ describe("validateWidgetDefinition — free-form trees", () => {
   });
 });
 
+describe("validateWidgetDefinition — capability-data rule (no invented fetch mechanisms)", () => {
+  const def = (root: unknown, extra: Record<string, unknown> = {}) => ({
+    id: "w",
+    name: "W",
+    description: "w",
+    version: 1,
+    root,
+    ...extra,
+  });
+
+  it("rejects a capability endpoint wired via an invented attr (data-fetch)", () => {
+    const result = validateWidgetDefinition(
+      def({
+        kind: "element",
+        tag: "div",
+        attrs: { "data-fetch": "/api/dyn/greek-nameday-today@1/nameday" },
+      }),
+      NO_GENERATED,
+    );
+    expect(result.ok).toBe(false);
+    if (!result.ok) expect(result.errors.join(" ")).toMatch(/useCapability/);
+  });
+
+  it("still allows /api/dyn/ URLs in real URL attrs (the browser does that fetch)", () => {
+    const result = validateWidgetDefinition(
+      def(
+        {
+          kind: "element",
+          tag: "img",
+          attrs: { src: "/api/dyn/random-car-image@1/image" },
+        },
+        { requiresCapabilities: ["random-car-image@1"] },
+      ),
+      NO_GENERATED,
+    );
+    expect(result.ok).toBe(true);
+  });
+
+  it("rejects requiresCapabilities when nothing in the tree can consume a capability", () => {
+    const result = validateWidgetDefinition(
+      def(
+        {
+          kind: "element",
+          tag: "div",
+          children: [{ kind: "text", value: "Namedays today" }],
+        },
+        { requiresCapabilities: ["greek-nameday-today@1"] },
+      ),
+      NO_GENERATED,
+    );
+    expect(result.ok).toBe(false);
+    if (!result.ok) expect(result.errors.join(" ")).toMatch(/requiresCapabilities/);
+  });
+
+  it("accepts requiresCapabilities consumed by a generated component", () => {
+    const result = validateWidgetDefinition(
+      def(
+        { kind: "component", component: "NamedayList@1" },
+        { requiresCapabilities: ["greek-nameday-today@1"] },
+      ),
+      new Set(["NamedayList@1"]),
+    );
+    expect(result.ok).toBe(true);
+  });
+});
+
 describe("validateTier1Wire — definitionJson transport", () => {
   it("still fails (with readable retry errors) when the JSON is garbage", async () => {
     // jsonrepair may coerce fragments into *some* JSON, but the result then

@@ -106,6 +106,11 @@ function walkNodes(node: UINode, visit: (n: UINode) => void): void {
   }
 }
 
+/** Attrs the BROWSER fetches itself — the only places a /api/dyn/ URL may
+ *  legally appear in a tree (e.g. an <img> whose src is a capability endpoint
+ *  returning the image). Anywhere else it is an invented fetch mechanism. */
+const BROWSER_URL_ATTRS = new Set(["src", "href", "poster"]);
+
 export function validateWidgetDefinition(
   raw: unknown,
   generatedComponentKeys: Set<string>,
@@ -117,6 +122,7 @@ export function validateWidgetDefinition(
   const errors: string[] = [];
   const builtins = new Set<string>(BUILTIN_COMPONENTS);
   const usedGenerated = new Set<string>();
+  let dynUrlAttrs = 0;
 
   walkNodes(def.root, (n) => {
     if (n.kind === "component") {
@@ -128,12 +134,31 @@ export function validateWidgetDefinition(
       errors.push(
         `root: component "${n.component}" is neither a built-in nor an existing generated component key`,
       );
-    } else if (n.kind === "element" && n.action && !isValidAction(n.action)) {
-      errors.push(
-        `root: element action "${n.action}" is invalid (steps: addRow | deleteRow | clearForm | toggleRow:<field> | setView:<view> | toggleGlobal:<key> | setGlobal:<key>=<value>, chained with ";")`,
-      );
+    } else if (n.kind === "element") {
+      if (n.action && !isValidAction(n.action)) {
+        errors.push(
+          `root: element action "${n.action}" is invalid (steps: addRow | deleteRow | clearForm | toggleRow:<field> | setView:<view> | toggleGlobal:<key> | setGlobal:<key>=<value>, chained with ";")`,
+        );
+      }
+      for (const [name, value] of Object.entries(n.attrs ?? {})) {
+        if (typeof value !== "string" || !value.includes("/api/dyn/")) continue;
+        if (BROWSER_URL_ATTRS.has(name)) dynUrlAttrs++;
+        else
+          errors.push(
+            `root: attr "${name}" points at a capability endpoint, but widget trees CANNOT fetch — no such mechanism exists. To display capability data, use a generated component that calls useCapability (plan one via Tier 2 if none exists).`,
+          );
+      }
     }
   });
+
+  // Capability-data rule: a declared capability dependency needs a consumer in
+  // the tree — a generated component (useCapability) or a browser-fetched URL
+  // attr. Plain elements/text cannot fetch.
+  if ((def.requiresCapabilities?.length ?? 0) > 0 && usedGenerated.size === 0 && dynUrlAttrs === 0) {
+    errors.push(
+      `requiresCapabilities: nothing in the tree can consume a capability — plain elements cannot fetch. Render capability data with a generated component that calls useCapability, or point a src/href attr directly at the /api/dyn/ endpoint if it returns media.`,
+    );
+  }
 
   // Security gate: strict sanitation — any disallowed tag/attr/URL/style is a
   // validation error fed back to the LLM retry, never stored.

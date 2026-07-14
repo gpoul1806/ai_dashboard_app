@@ -82,6 +82,21 @@ ACTIONS (strings for element "action" / Button.action / Checkbox.action):
   Send button uses "addRow;setView:home" (saves the row AND jumps to the home tab; addRow
   already clears the form afterward, so no separate clearForm is needed).
 
+CAPABILITY DATA (hard rule): a widget tree CANNOT fetch or load data. The
+bindings and actions above are the COMPLETE, CLOSED set — there is NO other
+mechanism, and inventing one (a "data-fetch"/"data-src"/"data-url" attr, a
+"$fetch" or "$capability" binding, ...) FAILS validation and would render as
+dead markup anyway. The ONLY two ways a widget can use a server capability
+(/api/dyn/*):
+1. a generated (Tier 2) component that calls useCapability — REQUIRED whenever
+   fetched data must be rendered as text/lists/anything dynamic. If no such
+   component exists yet, the feature NEEDS a new Tier 2 component — never fake
+   the fetch in the tree.
+2. a src/href/poster attr pointing directly at a capability endpoint that
+   returns the media itself (e.g. an img whose src is /api/dyn/cat-gif@1/gif).
+A widget's requiresCapabilities is valid ONLY when the tree actually consumes
+each capability one of these two ways.
+
 CROSS-WIDGET WIRING: widgets affect EACH OTHER through app-wide keys. Example — a
 switch that disables an input in another widget: the switch widget uses
 {"kind":"component","component":"Checkbox","props":{"checked":{"$global":"input-enabled"},"action":"toggleGlobal:input-enabled"}}
@@ -209,7 +224,7 @@ Rules:
 - If a cache candidate clearly satisfies the request, set "cacheHit" to its id.
 - Only add needsComponents / needsCapabilities entries when nothing existing (node tree, built-in or generated) fits. Reuse an existing generated component only when its description SEMANTICALLY matches the need — never plan to repurpose an unrelated one (a timer is not an audio player); plan a new component instead.
 - needsComponents ids are PascalCase (e.g. "Image"); needsCapabilities ids are kebab-case (e.g. "cat-gif").
-- Client components have NO direct network access; anything that needs external data needs a capability.
+- Client components have NO direct network access; anything that needs external data needs a capability. AND THE REVERSE (hard rule): a Tier 1 tree alone can NEVER render fetched data — whenever a widget must DISPLAY capability data (names, lists, quotes, live values...), needsComponents MUST include a generated component (new or existing) that calls useCapability to fetch and render it. Planning a "widget that fetches" without such a component guarantees a validation failure.
 - API-FREE ONLY: any capability you plan MUST be satisfiable with a keyless public API (no API key, no auth). Never plan a capability around a provider that requires a key (e.g. Giphy, OpenWeather) — choose a keyless alternative (e.g. cataas.com for cats, picsum.photos for images, dog.ceo, date.nager.at). If the request truly needs data only a keyed/private API provides, that is an INFEASIBLE request — set feasible:false with a reason rather than planning a key-requiring capability.
 - "widgetPlan" is a concrete one-paragraph spec for the Tier 1 composer (required when feasible; "" when infeasible). Include the intended placement/anchor/order, the visual direction (palette/mood), and any media URLs. Plan EXACTLY what the user asked for — never add demo elements, sample content, or duplicates of widgets that already exist. When the user asks for a bare control with no described look ("add a switch"), the plan must say: only the control itself, transparent background, no panel, no title, no extra labels. For EVERY plan: do not introduce headings/titles or container panels the user didn't ask for — a "table with columns X|Y|Z" plan is the table alone, styled, on a transparent background.`;
 
