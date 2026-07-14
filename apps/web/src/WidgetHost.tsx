@@ -1,8 +1,10 @@
-import React, { useCallback, useEffect, useMemo, useState } from "react";
+import { sanitizeTree } from "@myday/schema";
+import React, { useCallback, useContext, useEffect, useMemo, useState } from "react";
 import { api, type DataRow, type FeatureRecord } from "./api/client";
 import { ensureComponents } from "./loader";
 import { useRegistry } from "./registry";
 import {
+  AppActionsContext,
   RegistryContext,
   RenderNode,
   type Scope,
@@ -17,6 +19,7 @@ import {
  */
 export function WidgetHost({ feature }: { feature: FeatureRecord }) {
   const registry = useRegistry();
+  const appActions = useContext(AppActionsContext);
   const def = feature.definition;
   const [ready, setReady] = useState((def.requiresComponents ?? []).length === 0);
   const [loadError, setLoadError] = useState<string | null>(null);
@@ -57,7 +60,22 @@ export function WidgetHost({ feature }: { feature: FeatureRecord }) {
   const runAction = useCallback(
     async (action: string, scope: Scope) => {
       try {
-        if (action === "clearForm") {
+        if (action.startsWith("setView:")) {
+          // App-level: switches the active view/tab for the whole dashboard.
+          appActions?.setView(action.slice("setView:".length));
+        } else if (action.startsWith("toggleGlobal:")) {
+          appActions?.toggleGlobal(action.slice("toggleGlobal:".length));
+        } else if (action.startsWith("setGlobal:")) {
+          const expr = action.slice("setGlobal:".length);
+          const eq = expr.indexOf("=");
+          if (eq > 0) {
+            const key = expr.slice(0, eq);
+            const raw = expr.slice(eq + 1);
+            const value =
+              raw === "true" ? true : raw === "false" ? false : raw !== "" && !Number.isNaN(Number(raw)) ? Number(raw) : raw;
+            appActions?.setGlobal(key, value);
+          }
+        } else if (action === "clearForm") {
           setForm({});
         } else if (action === "addRow") {
           if (!def.dataSchema) return;
@@ -101,13 +119,18 @@ export function WidgetHost({ feature }: { feature: FeatureRecord }) {
         console.error(`widget action "${action}" failed`, err);
       }
     },
-    [def.dataSchema, feature.id, form],
+    [def.dataSchema, feature.id, form, appActions],
   );
 
+  const globals = appActions?.globals ?? {};
   const ctx: WidgetCtxValue = useMemo(
-    () => ({ definition: def, rows, form, setFormField, runAction }),
-    [def, rows, form, setFormField, runAction],
+    () => ({ definition: def, rows, form, globals, setFormField, runAction }),
+    [def, rows, form, globals, setFormField, runAction],
   );
+
+  // Defense in depth: trees are strict-validated at generation time, but every
+  // replay from the DB passes through the strip sanitizer before rendering.
+  const safeRoot = useMemo(() => sanitizeTree(def.root, "strip").node, [def.root]);
 
   if (loadError) {
     return <div className="widget-error">Failed to load "{feature.name}": {loadError}</div>;
@@ -119,7 +142,7 @@ export function WidgetHost({ feature }: { feature: FeatureRecord }) {
   return (
     <RegistryContext.Provider value={registry}>
       <WidgetContext.Provider value={ctx}>
-        <RenderNode node={def.root} />
+        <RenderNode node={safeRoot} />
       </WidgetContext.Provider>
     </RegistryContext.Provider>
   );

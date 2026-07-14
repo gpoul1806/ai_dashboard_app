@@ -1,4 +1,4 @@
-# My Day — Fully Generative Dashboard
+# Add Features — Fully Generative Dashboard
 
 Experimental **Fully Generative UI**. The client is a thin shell; the majority of
 the app is served by the LLM as JSON (and, when needed, as generated code). Ask

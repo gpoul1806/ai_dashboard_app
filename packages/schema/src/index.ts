@@ -29,7 +29,45 @@ export const BUILTIN_COMPONENTS = [
 export type BuiltinComponent = (typeof BUILTIN_COMPONENTS)[number];
 
 /* ------------------------------------------------------------------ */
-/* Tier 1 — WidgetDefinition (composition)                             */
+/* Bindings — reactive value expressions usable anywhere in a tree     */
+/* ------------------------------------------------------------------ */
+
+export const BindingSchema = z.union([
+  /** The widget's data rows (value must be "rows"). */
+  z.object({ $data: z.literal("rows") }),
+  /** Field of the current row (inside a List itemTemplate). */
+  z.object({ $row: z.string() }),
+  /** Current value of the named Input/Select. */
+  z.object({ $form: z.string() }),
+  /** Number of rows (value must be "rows"). */
+  z.object({ $count: z.literal("rows") }),
+  /** Number of rows where <field> is truthy. */
+  z.object({ $countWhere: z.string() }),
+  /** 0-100 percentage of rows where <field> is truthy. */
+  z.object({ $percentWhere: z.string() }),
+  /** Value of an app-wide shared state key (cross-widget wiring). */
+  z.object({ $global: z.string() }),
+  /** Negated truthiness of an app-wide key — e.g. disabled when a switch is off. */
+  z.object({ $globalNot: z.string() }),
+  /**
+   * Conditional literal: picks `then` when the app-wide key is truthy, else
+   * `else`. Prefix the key with "!" to negate. Works in text values, element
+   * attrs, style values, and component props — THE way to map state onto
+   * visuals (knob position, colors, labels) instead of showing raw values.
+   */
+  z.object({
+    $if: z.string(),
+    then: z.union([z.string(), z.number(), z.boolean()]),
+    else: z.union([z.string(), z.number(), z.boolean()]),
+  }),
+]);
+export type Binding = z.infer<typeof BindingSchema>;
+
+const BindableSchema = z.union([z.string(), z.number(), z.boolean(), BindingSchema]);
+export type Bindable = z.infer<typeof BindableSchema>;
+
+/* ------------------------------------------------------------------ */
+/* Tier 1 — WidgetDefinition (free-form generative UI)                 */
 /* ------------------------------------------------------------------ */
 
 export const DataFieldSchema = z.object({
@@ -39,39 +77,156 @@ export const DataFieldSchema = z.object({
 });
 export type DataField = z.infer<typeof DataFieldSchema>;
 
-export type ComponentNode = {
-  /** A built-in primitive name OR a generated component key like "Image@1". */
-  type: string;
-  props?: Record<string, unknown>;
-  children?: ComponentNode[];
-};
+/**
+ * The generic content tree. A node is one of three kinds:
+ *  - "text"      → a text leaf (literal or bound value)
+ *  - "element"   → any allowlisted HTML/SVG tag with LLM-authored inline style
+ *                  (media travels here too: video/audio/img/svg/canvas…)
+ *  - "component" → a seed primitive or generated "Image@1"-style component
+ */
+export type UINode =
+  | { kind: "text"; value: string | number | Binding }
+  | {
+      kind: "element";
+      /** Allowlisted HTML/SVG tag — enforced by sanitizeTree, not the schema. */
+      tag: string;
+      /** Descriptive attributes: src, controls, autoplay, loop, muted, poster, alt, href… */
+      attrs?: Record<string, string | number | boolean | Binding>;
+      /** camelCase inline CSS authored by the LLM; values may be $if bindings
+       *  so visuals react to state (e.g. a sliding switch knob). */
+      style?: Record<string, string | number | Binding>;
+      /** Action to run on click: "addRow" | "deleteRow" | "toggleRow:<field>" | "clearForm". */
+      action?: string;
+      children?: UINode[];
+    }
+  | {
+      kind: "component";
+      /** Seed primitive name OR generated component key like "Image@1". */
+      component: string;
+      props?: Record<string, unknown>;
+      children?: UINode[];
+    };
 
-export const ComponentNodeSchema: z.ZodType<ComponentNode> = z.lazy(() =>
-  z.object({
-    type: z.string().min(1),
-    props: z.record(z.string(), z.unknown()).optional(),
-    children: z.array(ComponentNodeSchema).optional(),
-  }),
-);
+export const UINodeSchema: z.ZodType<UINode> = z.lazy(() =>
+  z.discriminatedUnion("kind", [
+    z.object({ kind: z.literal("text"), value: BindableSchema }),
+    z.object({
+      kind: z.literal("element"),
+      tag: z.string().min(1),
+      attrs: z.record(z.string(), BindableSchema).optional(),
+      style: z.record(z.string(), z.union([z.string(), z.number(), BindingSchema])).optional(),
+      action: z.string().optional(),
+      children: z.array(UINodeSchema).optional(),
+    }),
+    z.object({
+      kind: z.literal("component"),
+      component: z.string().min(1),
+      props: z.record(z.string(), z.unknown()).optional(),
+      children: z.array(UINodeSchema).optional(),
+    }),
+  ]),
+) as z.ZodType<UINode>;
+
+/** The nine anchor regions for pinned (app-global floating) widgets. */
+export const ANCHORS = [
+  "top-left",
+  "top-center",
+  "top-right",
+  "middle-left",
+  "center",
+  "middle-right",
+  "bottom-left",
+  "bottom-center",
+  "bottom-right",
+] as const;
+
+export const PresentationSchema = z.object({
+  /**
+   * flow → an item in the dashboard grid; pinned → floats above the whole app
+   * (app-global, anchored); background → full-viewport layer behind the app.
+   */
+  placement: z.enum(["flow", "pinned", "background"]).default("flow"),
+  /** Screen anchor for pinned widgets. Default top-right. */
+  anchor: z.enum(ANCHORS).optional(),
+  /** Position within the flow grid (0 = first). Omit to append. */
+  order: z.number().int().optional(),
+  /** Stacking among pinned widgets. */
+  zIndex: z.number().int().optional(),
+  /** Chrome is opt-in: "none" renders bare; "card" adds one neutral surface. */
+  surface: z.enum(["none", "card"]).default("none"),
+  /**
+   * Named view (tab/page) this widget belongs to — it renders only while that
+   * view is active (switched via the "setView:<name>" action). Omit to show
+   * the widget in EVERY view (menus, backgrounds). The landing view is "home".
+   */
+  view: z.string().regex(/^[a-z0-9-]+$/, "kebab-case view name").optional(),
+  size: z
+    .object({
+      /** Columns a flow widget spans in the dashboard grid (1-4). */
+      gridColumnSpan: z.number().int().min(1).max(4).optional(),
+      /** CSS length for pinned widgets, e.g. "320px" or "20vw". */
+      width: z.string().optional(),
+      height: z.string().optional(),
+    })
+    .optional(),
+});
+export type Presentation = z.infer<typeof PresentationSchema>;
 
 export const WidgetDefinitionSchema = z.object({
   id: z.string().min(1),
   name: z.string().min(1),
   description: z.string().min(1),
   version: z.number().int().positive(),
-  root: ComponentNodeSchema,
+  root: UINodeSchema,
+  presentation: PresentationSchema.default({ placement: "flow", surface: "none" }),
   /** Generated component keys the client must load before render, e.g. ["Image@1"]. */
   requiresComponents: z.array(z.string()).default([]),
   /** Capability keys the widget calls through /api/dyn, e.g. ["giphy-search@1"]. */
   requiresCapabilities: z.array(z.string()).default([]),
   dataSchema: z.record(z.string(), DataFieldSchema).optional(),
-  /**
-   * flow → a card in the dashboard grid; pinned → a small floating Overlay;
-   * background → a full-viewport layer behind all widgets (non-interactive).
-   */
-  placement: z.enum(["flow", "pinned", "background"]).default("flow"),
 });
 export type WidgetDefinition = z.infer<typeof WidgetDefinitionSchema>;
+
+/* ------------------------------------------------------------------ */
+/* HTTP contract — feature record + request outcome envelope           */
+/* ------------------------------------------------------------------ */
+
+export const FeatureRecordSchema = z.object({
+  id: z.string(),
+  slug: z.string(),
+  name: z.string(),
+  description: z.string(),
+  version: z.number(),
+  definition: WidgetDefinitionSchema,
+  createdAt: z.string(),
+});
+export type FeatureRecord = z.infer<typeof FeatureRecordSchema>;
+
+/**
+ * The generic envelope every /api/features/request response uses,
+ * discriminated by `outcome`. `artifact.kind` is the extension point for
+ * future non-widget artifacts (notification, page, sound…).
+ */
+export const RequestOutcomeSchema = z.discriminatedUnion("outcome", [
+  z.object({
+    outcome: z.literal("created"),
+    artifact: z.object({
+      kind: z.literal("widget"),
+      feature: FeatureRecordSchema,
+    }),
+    servedFromCache: z.boolean(),
+    pendingCapabilityApprovals: z.array(z.string()),
+  }),
+  z.object({
+    outcome: z.literal("declined"),
+    userFacingReason: z.string(),
+  }),
+  z.object({
+    outcome: z.literal("removed"),
+    removedWidgets: z.array(z.object({ id: z.string(), name: z.string() })),
+  }),
+]);
+export type RequestOutcome = z.infer<typeof RequestOutcomeSchema>;
 
 /* ------------------------------------------------------------------ */
 /* Tier 2 — ComponentSpec (generated UI component)                     */
@@ -184,6 +339,27 @@ export const PlanSchema = z.object({
     .default([]),
   /** One-paragraph spec of the widget Tier 1 should compose (may be empty when infeasible). */
   widgetPlan: z.string().default(""),
+  /**
+   * Additional widgets to compose in the same request (one paragraph each) —
+   * used when one ask genuinely needs several widgets, e.g. a tab menu plus
+   * one content widget per tab.
+   */
+  moreWidgetPlans: z.array(z.string()).default([]),
+  /**
+   * Existing dashboard widgets to (re)assign to a named view, e.g. putting the
+   * current table on the "home" tab when a tab menu is created.
+   */
+  viewAssignments: z
+    .array(z.object({ featureId: z.string(), view: z.string() }))
+    .default([]),
+  /**
+   * Existing widgets to MODIFY (behavior, look, or cross-widget wiring). Each
+   * instruction fully describes the change; Tier 1 regenerates the definition
+   * in place (same feature id).
+   */
+  updatePlans: z
+    .array(z.object({ featureId: z.string(), instruction: z.string() }))
+    .default([]),
 });
 export type Plan = z.infer<typeof PlanSchema>;
 
@@ -194,3 +370,5 @@ export type Plan = z.infer<typeof PlanSchema>;
 export function jsonSchemaOf(schema: z.ZodType): unknown {
   return z.toJSONSchema(schema, { io: "input" });
 }
+
+export * from "./sanitize";

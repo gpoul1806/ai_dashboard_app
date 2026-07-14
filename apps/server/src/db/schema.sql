@@ -1,4 +1,4 @@
--- "My Day" Supabase schema (v1). Apply with the SQL editor or supabase db push.
+-- "Add Features" Supabase schema (v1). Apply with the SQL editor or supabase db push.
 create extension if not exists pg_trgm;
 
 create table if not exists features (

@@ -1,10 +1,56 @@
-import React, { useCallback, useEffect, useRef, useState } from "react";
+import type { Presentation } from "@myday/schema";
+import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   api,
   type CapabilityRecord,
   type FeatureRecord,
 } from "./api/client";
+import { AppActionsContext } from "./renderer";
 import { WidgetHost } from "./WidgetHost";
+
+/**
+ * Maps a pinned widget's presentation onto a fixed-position container.
+ * "The screen" for widgets is the area BELOW the app header (title + request
+ * bar) — exactly like the background layer reads visually. --header-h is kept
+ * up to date by a ResizeObserver in App. zIndex is clamped below the header's
+ * (50) so no widget can ever cover the input row.
+ */
+function pinnedStyle(pres: Presentation | undefined): React.CSSProperties {
+  const anchor = pres?.anchor ?? "top-right";
+  const style: React.CSSProperties = {
+    position: "fixed",
+    zIndex: Math.min(pres?.zIndex ?? 30, 40),
+    width: pres?.size?.width,
+    height: pres?.size?.height,
+    maxWidth: "min(92vw, 480px)",
+  };
+  const transforms: string[] = [];
+  if (anchor.startsWith("top")) style.top = "calc(var(--header-h, 0px) + 16px)";
+  else if (anchor.startsWith("bottom")) style.bottom = 48; // clears the dev-panel bar
+  else {
+    // Vertical middle of the area below the header.
+    style.top = "calc(50% + var(--header-h, 0px) / 2)";
+    transforms.push("translateY(-50%)");
+  }
+  if (anchor.endsWith("left")) style.left = 16;
+  else if (anchor.endsWith("right")) style.right = 16;
+  else {
+    style.left = "50%";
+    transforms.push("translateX(-50%)");
+  }
+  if (transforms.length > 0) style.transform = transforms.join(" ");
+  return style;
+}
+
+/** Opt-in neutral chrome: only when the definition asks for surface "card". */
+function Surfaced({ feature }: { feature: FeatureRecord }) {
+  const host = <WidgetHost feature={feature} />;
+  return feature.definition.presentation?.surface === "card" ? (
+    <div className="widget-surface">{host}</div>
+  ) : (
+    host
+  );
+}
 
 function DevPanel({
   capabilities,
@@ -94,6 +140,36 @@ export default function App() {
   const fileInputRef = useRef<HTMLInputElement>(null);
   // Controls the in-flight request so it can be cancelled mid-generation.
   const abortRef = useRef<AbortController | null>(null);
+  // Pinned widgets anchor to the area below the header — track its height
+  // (it grows with status lines / attachments) as a CSS variable.
+  const headerRef = useRef<HTMLElement>(null);
+  // The active view/tab (null until a widget switches it — the shell then
+  // falls back to "home" or the first declared view).
+  const [activeView, setActiveView] = useState<string | null>(null);
+  // App-wide shared state: any widget writes via setGlobal/toggleGlobal
+  // actions, any widget reads via {"$global"} bindings — cross-widget wiring.
+  const [globals, setGlobals] = useState<Record<string, unknown>>({});
+  const appActions = useMemo(
+    () => ({
+      globals,
+      setView: setActiveView,
+      setGlobal: (key: string, value: unknown) =>
+        setGlobals((g) => ({ ...g, [key]: value })),
+      toggleGlobal: (key: string) => setGlobals((g) => ({ ...g, [key]: !g[key] })),
+    }),
+    [globals],
+  );
+
+  useEffect(() => {
+    const el = headerRef.current;
+    if (!el) return;
+    const update = () =>
+      document.documentElement.style.setProperty("--header-h", `${el.offsetHeight}px`);
+    update();
+    const ro = new ResizeObserver(update);
+    ro.observe(el);
+    return () => ro.disconnect();
+  }, []);
 
   const addFiles = useCallback((files: FileList | File[] | null) => {
     if (!files) return;
@@ -151,36 +227,39 @@ export default function App() {
         pending.map((p) => api.uploadFile(p.file, controller.signal)),
       );
       const result = await api.requestFeature(request, attachments, controller.signal);
-      if ("removed" in result) {
+      if (result.outcome === "removed") {
         // A management action, not a build — refresh so the removed widgets go.
         setText("");
         await refresh();
-        const removedNames = result.removed.map((r) => r.name).join(", ");
+        const removedNames = result.removedWidgets.map((r) => r.name).join(", ");
         setStatus(
-          result.removed.length > 0 ? `Removed: ${removedNames}.` : "Nothing matched to remove.",
+          result.removedWidgets.length > 0
+            ? `Removed: ${removedNames}.`
+            : "Nothing matched to remove.",
         );
         return;
       }
-      if (result.declined) {
+      if (result.outcome === "declined") {
         // Not an error — a graceful, explained decline.
         setStatus(null);
         setToast("That one can’t be built here — try something else.");
-        setDeclined({ request, reason: result.reason });
+        setDeclined({ request, reason: result.userFacingReason });
         return;
       }
+      const { feature } = result.artifact;
       setText("");
       pending.forEach((p) => URL.revokeObjectURL(p.previewUrl));
       setPending([]);
       await refresh();
-      if (result.pendingApprovals.length > 0) {
+      if (result.pendingCapabilityApprovals.length > 0) {
         setStatus(
-          `Built "${result.feature.name}". New capabilities need approval in the dev panel: ${result.pendingApprovals.join(", ")}`,
+          `Built "${feature.name}". New capabilities need approval in the dev panel: ${result.pendingCapabilityApprovals.join(", ")}`,
         );
       } else {
         setStatus(
-          result.cached
-            ? `Served "${result.feature.name}" instantly from cache.`
-            : `Built "${result.feature.name}".`,
+          result.servedFromCache
+            ? `Served "${feature.name}" instantly from cache.`
+            : `Built "${feature.name}".`,
         );
       }
     } catch (e) {
@@ -214,15 +293,65 @@ export default function App() {
     [refresh],
   );
 
-  const backgroundFeatures = features.filter((f) => f.definition.placement === "background");
-  const pinnedFeatures = features.filter((f) => f.definition.placement === "pinned");
-  const flowFeatures = features.filter(
-    (f) =>
-      f.definition.placement !== "pinned" && f.definition.placement !== "background",
+  const clearAll = useCallback(async () => {
+    if (
+      !window.confirm(
+        "Remove all widgets from the dashboard? They stay cached — asking for one again brings it back instantly.",
+      )
+    ) {
+      return;
+    }
+    try {
+      const { cleared } = await api.clearDashboard();
+      await refresh();
+      setStatus(
+        cleared > 0
+          ? `Cleared ${cleared} widget${cleared === 1 ? "" : "s"} — all of them stay cached for instant reuse.`
+          : "Dashboard is already empty.",
+      );
+    } catch (e) {
+      setError(String((e as Error)?.message ?? e));
+    }
+  }, [refresh]);
+
+  // ---- views (tabs/pages) -------------------------------------------------
+  // Widgets may declare presentation.view: they render only while that view is
+  // active. Widgets WITHOUT a view (menus, backgrounds) render in every view.
+  // Views are switched by widgets via the "setView:<name>" action.
+  const viewOf = (f: FeatureRecord) => f.definition.presentation?.view;
+  const views = useMemo(
+    () => [...new Set(features.map(viewOf).filter((v): v is string => Boolean(v)))],
+    [features],
   );
+  // Landing view: "home" by convention, else the first declared view.
+  const effectiveView =
+    activeView && views.includes(activeView)
+      ? activeView
+      : views.includes("home")
+        ? "home"
+        : (views[0] ?? null);
+  const inView = (f: FeatureRecord) => {
+    const v = viewOf(f);
+    return !v || v === effectiveView;
+  };
+
+  const placementOf = (f: FeatureRecord) => f.definition.presentation?.placement ?? "flow";
+  const backgroundFeatures = features.filter(
+    (f) => placementOf(f) === "background" && inView(f),
+  );
+  const pinnedFeatures = features.filter((f) => placementOf(f) === "pinned" && inView(f));
+  // Flow widgets honor presentation.order (0 = first); unordered ones keep
+  // their creation order after the ordered ones (stable sort).
+  const flowFeatures = features
+    .filter((f) => placementOf(f) === "flow" && inView(f))
+    .sort(
+      (a, b) =>
+        (a.definition.presentation?.order ?? Number.MAX_SAFE_INTEGER) -
+        (b.definition.presentation?.order ?? Number.MAX_SAFE_INTEGER),
+    );
 
   return (
-    <>
+    <AppActionsContext.Provider value={appActions}>
       {/* Full-viewport layer behind the app for "background" widgets. */}
       {backgroundFeatures.length > 0 && (
         <div className="background-layer">
@@ -232,8 +361,8 @@ export default function App() {
         </div>
       )}
       <div className="app">
-      <header className="app-header">
-        <h1>My Day</h1>
+      <header className="app-header" ref={headerRef}>
+        <h1>Add a feature</h1>
         <div
           className={`ask ${dragOver ? "drag-over" : ""}`}
           onDragOver={(e) => {
@@ -266,12 +395,19 @@ export default function App() {
           >
             📎
           </button>
-          <input
+          <textarea
             className="ask-text"
+            rows={2}
             value={text}
             placeholder="Ask for any feature… e.g. “a todo list”, “a cat gif top-right”, or attach a file"
             onChange={(e) => setText(e.target.value)}
-            onKeyDown={(e) => e.key === "Enter" && submit()}
+            onKeyDown={(e) => {
+              // Enter submits; Shift+Enter inserts a newline.
+              if (e.key === "Enter" && !e.shiftKey) {
+                e.preventDefault();
+                submit();
+              }
+            }}
             onPaste={(e) => {
               const files = Array.from(e.clipboardData.files);
               if (files.length > 0) {
@@ -289,6 +425,14 @@ export default function App() {
               Cancel
             </button>
           )}
+          <button
+            className="clear-all-btn"
+            onClick={clearAll}
+            disabled={busy || features.length === 0}
+            title="Remove every widget from the dashboard (they stay cached for instant reuse)"
+          >
+            Clear all
+          </button>
         </div>
 
         {pending.length > 0 && (
@@ -347,22 +491,36 @@ export default function App() {
         {flowFeatures.length === 0 && (
           <p className="muted empty-dash">No widgets yet — ask for one above.</p>
         )}
-        {flowFeatures.map((f) => (
-          <div className="widget-slot" key={f.id}>
-            <WidgetHost feature={f} />
-          </div>
-        ))}
+        {flowFeatures.map((f) => {
+          const size = f.definition.presentation?.size;
+          const span = size?.gridColumnSpan;
+          // Content-sized by default (CSS fit-content); explicit size wins.
+          const style: React.CSSProperties = {};
+          if (span) style.gridColumn = `span ${span}`;
+          if (size?.width) style.width = size.width;
+          if (size?.height) style.height = size.height;
+          return (
+            <div
+              className="widget-slot"
+              key={f.id}
+              style={Object.keys(style).length ? style : undefined}
+            >
+              <Surfaced feature={f} />
+            </div>
+          );
+        })}
       </main>
 
-      {/* Pinned widgets render in the overlay layer (their roots use Overlay). */}
-      <div className="overlay-layer">
-        {pinnedFeatures.map((f) => (
-          <WidgetHost key={f.id} feature={f} />
-        ))}
-      </div>
+      {/* Pinned widgets float above the app — the shell positions each one
+          from presentation.anchor / size / zIndex. */}
+      {pinnedFeatures.map((f) => (
+        <div key={f.id} style={pinnedStyle(f.definition.presentation)}>
+          <Surfaced feature={f} />
+        </div>
+      ))}
 
       <DevPanel capabilities={capabilities} onApprove={approve} />
       </div>
-    </>
+    </AppActionsContext.Provider>
   );
 }

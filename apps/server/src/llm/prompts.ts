@@ -1,57 +1,121 @@
 import {
   type Attachment,
-  BUILTIN_COMPONENTS,
-  CapabilitySpecSchema,
-  ComponentSpecSchema,
-  PlanSchema,
+  SAFE_TAGS,
   WidgetDefinitionSchema,
   attachmentKind,
   jsonSchemaOf,
 } from "@myday/schema";
 import type { CapabilityRow, ComponentRow, FeatureRow, SimilarFeature } from "../db";
+import type { SystemPrompt } from "./client";
 
 /**
  * Per-tier system prompts, generated from the Zod schemas + the live registry
  * index (never hand-maintained in parallel with the schemas).
+ *
+ * Each builder returns { stable, volatile }: stable is byte-identical across
+ * requests (Anthropic prompt caching), volatile carries the live registry /
+ * dashboard / attachment context.
  */
 
 const js = (schema: Parameters<typeof jsonSchemaOf>[0]) =>
   JSON.stringify(jsonSchemaOf(schema), null, 2);
 
-/** Prop conventions + binding language for the seed primitives. Must match the
- *  client renderer (apps/web/src/renderer + registry/primitives). */
-const BUILTIN_DOC = `
-Built-in primitives (usable as ComponentNode.type):
-- Card { title?: string } — container card; children inside.
-- Stack { direction?: "row"|"column", gap?: number } — flex layout for children.
-- Text { text: string|binding, variant?: "title"|"body"|"muted" }
-- Input { name: string, placeholder?: string, type?: string } — binds its value to the widget form state under "name". Enter triggers addRow.
-- Button { label: string, action?: Action }
-- List { items: {"$data":"rows"}, itemTemplate: ComponentNode, empty?: string } — renders itemTemplate once per row; inside the template use {"$row":"<field>"} bindings.
-- Checkbox { checked: boolean|binding, label?: string, action?: Action }
-- Select { name: string, options: string[], placeholder?: string } — binds to form state like Input.
-- Counter { value: number|binding, label?: string }
-- ProgressBar { value: number|binding (0-100), label?: string }
-- Overlay { position?: "top-right"|"top-left"|"bottom-right"|"bottom-left"|"center" } — floating container; use as the ROOT node of widgets with placement "pinned".
+/** The free-form node language + presentation + binding/action vocabulary.
+ *  Must match the client renderer (apps/web/src/renderer) and the shared
+ *  sanitizer allowlists (@myday/schema/sanitize). */
+const NODE_DOC = `
+THE CONTENT TREE — a widget's "root" is a UINode. Three kinds:
 
-Placement:
-- "flow" (default) → a card in the dashboard grid (bounded box).
-- "pinned" → a small floating Overlay (root node must be Overlay).
-- "background" → a FULL-VIEWPORT layer rendered behind all widgets, non-interactive. Use this for requests like "app background", "background of the entire app", or a full-screen animation. A background widget's root component must FILL its container: style width and height to "100%" (or 100vw/100vh) — never a fixed pixel box — so it spans the whole screen.
+1. {"kind":"text","value": string|number|binding} — a text leaf.
+2. {"kind":"element","tag":"div","attrs":{...},"style":{...},"action":"...","children":[...]}
+   — ANY allowlisted HTML/SVG element. THIS IS YOUR MAIN TOOL: you design the
+   entire look yourself with inline styles. Media lives here too:
+   - video → {"kind":"element","tag":"video","attrs":{"src":"...","controls":true,"loop":true,"muted":true,"autoplay":true}}
+   - sound → {"kind":"element","tag":"audio","attrs":{"src":"...","controls":true}} (omit "controls" for hidden ambient audio only if some visible element controls it)
+   - image → {"kind":"element","tag":"img","attrs":{"src":"...","alt":"..."}}
+   - vector art / gauges / charts → "svg" with path/circle/rect/linearGradient children.
+   "style" is camelCase inline CSS ({"backgroundColor":"#0f0f14","borderRadius":"18px","padding":"20px"}).
+   CSS animations: use inline style with transform/transition; for keyframed motion prefer SVG animate-free techniques or a Tier-2 component.
+   "action" (optional) runs on click: same action strings as components (below).
+   Allowed tags (anything else is rejected): ${[...SAFE_TAGS].join(", ")}.
+   Attribute rules: no "class", no "style"-as-string, no event handlers (on*);
+   URLs in src/href/poster must be https/http, same-origin relative (/uploads/…, /api/…), or data:image/*.
+   NATIVE FORM TAGS (input/select/textarea/form/button) ARE NOT ALLOWED — for user input you MUST use the built-in components below (they carry the form state).
+3. {"kind":"component","component":"<Name>","props":{...},"children":[...]}
+   — a built-in component or a generated component key like "Image@1".
 
-Binding expressions (JSON objects usable as any prop value):
-- {"$data": "rows"}          → the widget's stored data rows
-- {"$row": "<field>"}        → field of the current row (only inside List itemTemplate)
-- {"$form": "<name>"}        → live value of the named Input/Select
-- {"$count": "rows"}         → number of rows
-- {"$countWhere": "<field>"} → number of rows where <field> is truthy
-- {"$percentWhere": "<f>"}   → 0-100 percentage of rows where <f> is truthy
+BUILT-IN COMPONENTS (optional vocabulary — use them for data/state, style the rest yourself):
+- Input { name, placeholder?, type?, style?, disabled? } — binds its value to widget form state under "name". Enter triggers addRow. disabled accepts a binding. Do NOT set "cursor" in Input/Select/Button styles — the shell derives it from the live enabled/disabled state automatically.
+- Select { name, options: string[], placeholder?, style?, disabled? } — binds to form state like Input.
+- Button { label, action?, style?, disabled? } — a neutral clickable; prefer styling your own element nodes with "action" for distinctive looks.
+- Checkbox { checked: binding, label?, action? }
+- List { items: {"$data":"rows"}, itemTemplate: UINode, empty?: string } — renders itemTemplate once per row; inside it use {"$row":"<field>"} bindings.
+- Card / Stack / Text / Counter / ProgressBar / Overlay also exist but are NEUTRAL — element nodes with your own styling are almost always better.
 
-Actions (string values for Button.action / Checkbox.action):
-- "addRow"            → creates a data row from the current form values (per dataSchema), then clears the form
+BINDINGS (JSON objects usable as text values, element attrs, or component props):
+- {"$data":"rows"}          → the widget's stored data rows (List items)
+- {"$row":"<field>"}        → field of the current row (only inside List itemTemplate)
+- {"$form":"<name>"}        → live value of the named Input/Select
+- {"$count":"rows"}         → number of rows
+- {"$countWhere":"<field>"} → number of rows where <field> is truthy
+- {"$percentWhere":"<f>"}   → 0-100 percentage of rows where <f> is truthy
+- {"$global":"<key>"}       → value of an APP-WIDE shared state key (readable from ANY widget)
+- {"$globalNot":"<key>"}    → negated truthiness of an app-wide key (true when the key is off/unset)
+- {"$if":"<key>","then":X,"else":Y} → X when the app-wide key is truthy, else Y (prefix key with "!" to negate). Works in text values, element attrs, STYLE VALUES, and component props — this is how visuals react to state.
+
+ACTIONS (strings for element "action" / Button.action / Checkbox.action):
+- "addRow"            → creates a data row from current form values (per dataSchema), then clears the form
 - "deleteRow"         → deletes the current row (only inside List itemTemplate)
 - "toggleRow:<field>" → flips a boolean field on the current row
 - "clearForm"
+- "setView:<name>"     → switches the WHOLE app to the named view/tab (use on menu/tab items)
+- "toggleGlobal:<key>" → flips an app-wide boolean key (kebab-case)
+- "setGlobal:<key>=<value>" → sets an app-wide key (value: true/false/number/string)
+
+CROSS-WIDGET WIRING: widgets affect EACH OTHER through app-wide keys. Example — a
+switch that disables an input in another widget: the switch widget uses
+{"kind":"component","component":"Checkbox","props":{"checked":{"$global":"input-enabled"},"action":"toggleGlobal:input-enabled"}}
+(or a styled element with action "toggleGlobal:input-enabled"), and the input widget
+uses {"kind":"component","component":"Input","props":{"name":"text","disabled":{"$globalNot":"input-enabled"}}}.
+Input/Select/Button accept a "disabled" prop (boolean or binding). Unset keys are
+falsy — name keys so the default state is correct (e.g. "input-enabled" starts off).
+If the default should be ON, add "setGlobal:<key>=true" guidance via the switch's
+initial description or pick inverted naming ("input-locked").
+
+NEVER show raw state values ("true"/"false") as user-facing text — always map state
+to human words/visuals with {"$if":...}. A CORRECT animated switch visual:
+{"kind":"element","tag":"div","action":"toggleGlobal:power-on",
+ "style":{"width":"56px","height":"30px","borderRadius":"15px","cursor":"pointer","padding":"3px","transition":"background 0.2s",
+          "background":{"$if":"power-on","then":"#7c5cff","else":"#3a3a44"}},
+ "children":[{"kind":"element","tag":"div",
+   "style":{"width":"24px","height":"24px","borderRadius":"50%","background":"#fff","transition":"transform 0.2s",
+            "transform":{"$if":"power-on","then":"translateX(26px)","else":"translateX(0px)"}}}]}
+with a status label like {"kind":"text","value":{"$if":"power-on","then":"ON","else":"OFF"}}.
+
+PRESENTATION (the "presentation" object on the definition — how/where the widget appears):
+- placement "flow" (default) → an item in the dashboard grid, CONTENT-SIZED by default: the widget occupies exactly its element's natural width/height, nothing more (a bare switch takes 56×30). Feature panels/cards that should fill their grid cell must set size.width "100%". Optional "order" (0 = first position) and size.gridColumnSpan (1-4, combine with size.width "100%").
+- placement "pinned" → floats above the dashboard, anchored to the visible widget area (the shell automatically keeps it BELOW the app's title/request bar — "top of the screen" means just under the input row). Set "anchor" to one of: top-left, top-center, top-right, middle-left, center, middle-right, bottom-left, bottom-center, bottom-right (default top-right). Optional size.width/height (CSS lengths) and zIndex (orders pinned widgets among themselves; the app header always stays on top).
+- placement "background" → a FULL-VIEWPORT layer rendered BEHIND the whole app, non-interactive. For "app background" / global ambience requests. The root must fill: width/height 100%.
+- surface "none" (default) → your tree renders bare: YOU own the entire look. surface "card" → the shell wraps it in one neutral card — use only when a plain container genuinely fits.
+- view "<name>" (kebab-case) → the widget renders ONLY while that view/tab is active; switch views with the "setView:<name>" action. OMIT view to make the widget GLOBAL (visible in every view — menus, backgrounds, ambient audio). The landing view is always named "home".
+- Map the user's positional language: "top right" → pinned+anchor top-right; "in the middle of the screen" → pinned+anchor center; "behind everything"/"as the app background"/"globally" → background; "first/at the top of the dashboard" → flow+order 0.
+
+DESIGN SCOPE — match the visual investment to the request:
+- BARE CONTROL requests ("add a switch", "an input field", "a button") with no
+  described look/mood/context: render ONLY the requested control. NO container
+  panel, NO background color (fully transparent), NO title/heading, NO labels
+  or helper text the user didn't ask for. The root is the control itself (or a
+  minimal unstyled wrapper). Style only the control's own parts (e.g. the
+  switch track/knob) so it is visible and usable.
+- FEATURE requests with a purpose or mood (a rain-sounds player, a focus
+  timer, a dashboard table): design distinctively — choose a palette,
+  typography, spacing, and shape language that fit the request. A rain-sounds
+  widget can be a deep blue glassy panel; a timer a dark purple gradient card
+  with a big monospaced readout. Never default to a plain white box.
+The shell imposes NO chrome either way. The app's primary text color is BLACK:
+text without an explicit "color" style renders black on the light app
+background — only set a color when the widget's own background needs it
+(e.g. white text inside a dark panel).
 `.trim();
 
 function componentIndex(components: ComponentRow[]): string {
@@ -72,15 +136,14 @@ function attachmentSection(attachments: Attachment[]): string {
     .join("\n");
   return `
 The user attached these files. Their URLs are same-origin and can be used
-DIRECTLY as src/href in a component — no capability, no fetch, no key needed:
+DIRECTLY as src/href in an element node — no capability, no fetch, no key needed:
 ${lines}
 
 Guidance:
-- image → show it with an Image component: <img src={url} .../>
-- audio → an audio player: <audio controls src={url} />
-- video → a video player: <video controls src={url} />
-- other files → a download/open link: <a href={url} download>filename</a>
-Build (or reuse) the minimal generated component needed and pass the url as a prop.
+- image → {"kind":"element","tag":"img","attrs":{"src":"<url>"}}
+- audio → {"kind":"element","tag":"audio","attrs":{"src":"<url>","controls":true}}
+- video → {"kind":"element","tag":"video","attrs":{"src":"<url>","controls":true}}
+- other files → {"kind":"element","tag":"a","attrs":{"href":"<url>","download":true},"children":[{"kind":"text","value":"<filename>"}]}
 `.trim();
 }
 
@@ -96,12 +159,58 @@ function capabilityIndex(capabilities: CapabilityRow[]): string {
     .join("\n");
 }
 
-const CONTEXT = `You are the server-side brain of "My Day", a fully generative dashboard web app.
-The client is a thin shell that renders widget JSON with a small set of built-in React primitives, dynamically imports generated React components, and calls generated server capabilities under /api/dyn/*. Users ask for ANY feature in natural language.`;
+const CONTEXT = `You are the server-side brain of "Add Features", a fully generative dashboard web app.
+The client is a thin shell that renders a generic JSON node tree (free-form HTML/SVG elements with your inline styles + a few stateful built-in components), dynamically imports generated React components, and calls generated server capabilities under /api/dyn/*. Users ask for ANY feature in natural language.`;
 
 /* ------------------------------------------------------------------ */
 /* Planner                                                             */
 /* ------------------------------------------------------------------ */
+
+const PLANNER_STABLE = `${CONTEXT}
+
+You are the PLANNER. Decide which generation tiers are needed for the user's request.
+
+Tier 1 (compose): the feature can be expressed as a widget node tree — free-form styled HTML/SVG elements, media tags, and the stateful built-ins. This covers ALL static/visual/media features and all simple data widgets. STRONGLY prefer it.
+Tier 2 (new UI component): ONLY for components that need internal state or logic a JSON tree cannot express — timers/clocks that tick, canvas animations, components that fetch through a capability. Static visuals NEVER need Tier 2.
+Tier 3 (new server capability): backend logic is needed (external API proxy, RSS fetcher, stream endpoint) → plan a new capability.
+
+${NODE_DOC}
+
+Rules:
+- INTENT — decide FIRST. If the user asks to REMOVE, DELETE, hide, clear, or get rid of one or more widgets already on the dashboard, set "intent": "remove" and "removeFeatureIds" to the ids of the matching widgets from the dashboard list; leave all build fields empty and feasible: true. Never "build" a widget that merely claims something was removed — removal is a real action, not a widget. If no dashboard widget matches what they asked to remove, set feasible: false with a declineReason saying you couldn't find a matching widget. Otherwise set "intent": "create".
+- If the user attached files, the request IS feasible via those attachment URLs (they need no key) — build a widget that displays/plays/links them; do not decline for lack of an API.
+- FEASIBILITY GATE — decide next (for create intent). A request is only feasible if it can be built from the node tree, generated components, and keyless public APIs (no API key, no login, no private/account data) running inside the sandbox. If it fundamentally requires a private/authenticated API key, access to the user's accounts or devices, real-time data with no keyless source, or anything impossible in a browser+sandbox, set "feasible": false, leave the other build fields empty, and write "declineReason": a clear, friendly, SPECIFIC explanation of the exact reason (name what it would need and why this app can't do it) followed by a short suggestion to try something else. When feasible, set "feasible": true and "declineReason": "".
+- APP-SCOPE RULE (hard rule): when the request concerns the ENTIRE application — wording like "global", "the whole app", "everywhere", "all pages/tabs", or app-level artifacts (navigation menu, app background, app-wide theme/ambience) — the feature MUST affect the entire app, never render as one isolated card:
+  • app backdrop / ambience → placement "background" (fills the viewport behind everything, no "view").
+  • a global menu / nav / control bar → ONE pinned widget with NO "view" (visible on every tab).
+  • tabs/pages/views (e.g. "a menu where home shows X, about shows Y, contact shows Z"): plan the menu widget in "widgetPlan" (pinned, NO view, each tab item an element with action "setView:<name>"), plan ONE content widget PER tab in "moreWidgetPlans" (each with presentation.view set to its tab's name), and move EXISTING widgets onto their tab with "viewAssignments" (e.g. the current table → view "home"). When a tab's content IS an existing widget, ONLY add it to viewAssignments — NEVER plan a duplicate widget for that tab. viewAssignments views must be real kebab-case tab names (never ""); a widget meant for every tab is simply left out of viewAssignments. The landing view MUST be named "home". Whatever must stay visible on every tab (the menu, backgrounds) OMITS view.
+  • Every widgetPlan / moreWidgetPlans paragraph must state the widget's placement AND its view (or "global — no view").
+- MODIFY RULE: when the user asks to FIX, change, extend, restyle, correct, improve, or WIRE TOGETHER widgets that already exist on the dashboard (e.g. "fix the toggle switch", "make the switch disable the input"), use "updatePlans": [{featureId, instruction}] — one entry per widget to modify, each instruction fully describing the change (for cross-widget wiring name the exact shared key both sides must use, e.g. "input-enabled" with {"$global"}/{"$globalNot"} bindings and toggleGlobal). NEVER create a new widget when the request refers to an existing one — that duplicates it; leave widgetPlan "" when the request only modifies.
+- RECONCILE RULE (check-then-act): before planning, map EVERY element the request mentions onto the dashboard list above. For each one: a matching widget EXISTS → add an updatePlans entry for it; NO widget matches → create it (widgetPlan / moreWidgetPlans). A single request may mix updates and creations. When wiring behavior across widgets, REUSE the shared key shown in the existing widget's facts (e.g. a switch already toggling "switch-on" means every other side must bind to "switch-on") — invent a new key only when none exists yet, and then use that ONE key in every involved instruction.
+- If a cache candidate clearly satisfies the request, set "cacheHit" to its id.
+- Only add needsComponents / needsCapabilities entries when nothing existing (node tree, built-in or generated) fits. Reuse an existing generated component only when its description SEMANTICALLY matches the need — never plan to repurpose an unrelated one (a timer is not an audio player); plan a new component instead.
+- needsComponents ids are PascalCase (e.g. "Image"); needsCapabilities ids are kebab-case (e.g. "cat-gif").
+- Client components have NO direct network access; anything that needs external data needs a capability.
+- API-FREE ONLY: any capability you plan MUST be satisfiable with a keyless public API (no API key, no auth). Never plan a capability around a provider that requires a key (e.g. Giphy, OpenWeather) — choose a keyless alternative (e.g. cataas.com for cats, picsum.photos for images, dog.ceo, date.nager.at). If the request truly needs data only a keyed/private API provides, that is an INFEASIBLE request — set feasible:false with a reason rather than planning a key-requiring capability.
+- "widgetPlan" is a concrete one-paragraph spec for the Tier 1 composer (required when feasible; "" when infeasible). Include the intended placement/anchor/order, the visual direction (palette/mood), and any media URLs. Plan EXACTLY what the user asked for — never add demo elements, sample content, or duplicates of widgets that already exist. When the user asks for a bare control with no described look ("add a switch"), the plan must say: only the control itself, transparent background, no panel, no title, no extra labels.`;
+
+/** Compact facts about a live widget so the planner can reconcile against it:
+ *  placement, view, and the app-wide shared keys it reads/writes. */
+function widgetFacts(f: FeatureRow): string {
+  const s = JSON.stringify(f.definition);
+  const keys = [
+    ...new Set(
+      [...s.matchAll(/"\$(?:global|globalNot)":"([a-z0-9-]+)"|"\$if":"!?([a-z0-9-]+)"|(?:toggleGlobal|setGlobal):([a-z0-9-]+)/g)].map(
+        (m) => m[1] ?? m[2] ?? m[3],
+      ),
+    ),
+  ];
+  const pres = f.definition.presentation;
+  const bits = [`placement ${pres?.placement ?? "flow"}`];
+  if (pres?.view) bits.push(`view ${pres.view}`);
+  if (keys.length > 0) bits.push(`shared keys: ${keys.join(", ")}`);
+  return bits.join("; ");
+}
 
 export function plannerSystem(
   components: ComponentRow[],
@@ -109,13 +218,13 @@ export function plannerSystem(
   cacheCandidates: SimilarFeature[],
   currentFeatures: FeatureRow[],
   attachments: Attachment[] = [],
-): string {
+): SystemPrompt {
   const attachSection = attachmentSection(attachments);
   const dashboard =
     currentFeatures.length === 0
       ? "(empty)"
       : currentFeatures
-          .map((f) => `- id "${f.id}": ${f.name} — ${f.description}`)
+          .map((f) => `- id "${f.id}": ${f.name} — ${f.description} (${widgetFacts(f)})`)
           .join("\n");
   const candidates =
     cacheCandidates.length === 0
@@ -127,17 +236,9 @@ export function plannerSystem(
           )
           .join("\n");
 
-  return `${CONTEXT}
-
-You are the PLANNER. Decide which generation tiers are needed for the user's request.
-
-Tier 1 (compose): the feature can be built from existing components → widget JSON only. This is the fast path — prefer it.
-Tier 2 (new UI component): the client lacks a component (e.g. Image, AudioPlayer, Chart) → plan a new component.
-Tier 3 (new server capability): backend logic is needed (external API proxy, RSS fetcher, stream endpoint) → plan a new capability.
-
-${BUILTIN_DOC}
-
-Existing generated components (reusable — do NOT plan duplicates):
+  return {
+    stable: PLANNER_STABLE,
+    volatile: `Existing generated components (reusable — do NOT plan duplicates):
 ${componentIndex(components)}
 
 Existing capabilities (reusable — do NOT plan duplicates):
@@ -148,28 +249,15 @@ ${dashboard}
 
 Cached features similar to this request:
 ${candidates}
-${attachSection ? `\n${attachSection}\n` : ""}
-Rules:
-- INTENT — decide FIRST. If the user asks to REMOVE, DELETE, hide, clear, or get rid of one or more widgets already on the dashboard, set "intent": "remove" and "removeFeatureIds" to the ids of the matching widgets from the list above; leave all build fields empty and feasible: true. Never "build" a widget that merely claims something was removed — removal is a real action, not a widget. If no dashboard widget matches what they asked to remove, set feasible: false with a declineReason saying you couldn't find a matching widget. Otherwise set "intent": "create".
-- If the user attached files, the request IS feasible via those attachment URLs (they need no key) — build a widget that displays/plays/links them; do not decline for lack of an API.
-- FEASIBILITY GATE — decide next (for create intent). A request is only feasible if it can be built from built-in primitives, generated components, and keyless public APIs (no API key, no login, no private/account data) running inside the sandbox. If it fundamentally requires a private/authenticated API key, access to the user's accounts or devices, real-time data with no keyless source, or anything impossible in a browser+sandbox, set "feasible": false, leave the other build fields empty, and write "declineReason": a clear, friendly, SPECIFIC explanation of the exact reason (name what it would need and why this app can't do it) followed by a short suggestion to try something else. When feasible, set "feasible": true and "declineReason": "".
-- If a cache candidate clearly satisfies the request, set "cacheHit" to its id.
-- Only add needsComponents / needsCapabilities entries when nothing existing (built-in or generated) fits.
-- needsComponents ids are PascalCase (e.g. "Image"); needsCapabilities ids are kebab-case (e.g. "cat-gif").
-- Client components have NO direct network access; anything that needs external data needs a capability.
-- API-FREE ONLY: any capability you plan MUST be satisfiable with a keyless public API (no API key, no auth). Never plan a capability around a provider that requires a key (e.g. Giphy, OpenWeather) — choose a keyless alternative (e.g. cataas.com for cats, picsum.photos for images, dog.ceo, date.nager.at). If the request truly needs data only a keyed/private API provides, that is an INFEASIBLE request — set feasible:false with a reason rather than planning a key-requiring capability.
-- "widgetPlan" is a concrete one-paragraph spec for the Tier 1 composer (required when feasible; "" when infeasible).
-
-Respond with ONLY a JSON object (no prose, no markdown fence) matching this JSON Schema:
-${js(PlanSchema)}`;
+${attachSection ? `\n${attachSection}` : ""}`,
+  };
 }
 
 /* ------------------------------------------------------------------ */
 /* Tier 3 — capability generation                                      */
 /* ------------------------------------------------------------------ */
 
-export function tier3System(): string {
-  return `${CONTEXT}
+const TIER3_STABLE = `${CONTEXT}
 
 You are the TIER 3 generator: you write a new server capability that will run inside a locked-down sandbox (isolated-vm).
 
@@ -184,25 +272,19 @@ Each endpoint's "handlerSource" MUST be a single async arrow function EXPRESSION
 - API-FREE REQUIREMENT (hard rule): the capability MUST work with NO API key and NO configured secrets. Call ONLY public APIs that need no authentication. Do NOT emit "{{secret:...}}" placeholders, and do NOT send Authorization / api_key / token / apikey / x-api-key / client_id headers or query params. If the obvious provider needs a key (Giphy, Tenor with a key, OpenWeather, YouTube Data API, News API, ...), pick a keyless alternative or a direct public media URL instead. A capability that needs a key is rejected.
 - Keyless sources you can rely on (examples): cat images/GIFs → https://cataas.com ("https://cataas.com/cat/gif", or "https://cataas.com/cat?json=true" for metadata, or "https://cataas.com/api/cats?tags=..." to search); any-topic random image → https://picsum.photos ("https://picsum.photos/seed/<word>/300"); dog images → https://dog.ceo/api/breeds/image/random; jokes → https://icanhazdadjoke.com (send header {"Accept":"application/json"} — that is allowed, it is not auth); public holidays → https://date.nager.at. Prefer returning a direct media URL when the source exposes one (e.g. cataas image URLs) so no key is ever involved.
 - domainAllowlist must list exactly the keyless domains capFetch needs (e.g. ["cataas.com"]). Adding a domain is a logged, reviewed event — keep it minimal.
-- Return JSON-serializable bodies and appropriate status codes; validate query/body inputs defensively.
+- Return JSON-serializable bodies and appropriate status codes; validate query/body inputs defensively.`;
 
-Respond with ONLY a JSON object (no prose, no markdown fence) matching this JSON Schema:
-${js(CapabilitySpecSchema)}`;
+export function tier3System(): SystemPrompt {
+  return { stable: TIER3_STABLE, volatile: "" };
 }
 
 /* ------------------------------------------------------------------ */
 /* Tier 2 — component generation                                       */
 /* ------------------------------------------------------------------ */
 
-export function tier2System(
-  capabilities: CapabilityRow[],
-  attachments: Attachment[] = [],
-): string {
-  const attachSection = attachmentSection(attachments);
-  return `${CONTEXT}
+const TIER2_STABLE = `${CONTEXT}
 
-You are the TIER 2 generator: you write a new single-file React component that the client will dynamically import at runtime.
-${attachSection ? `\n${attachSection}\n` : ""}
+You are the TIER 2 generator: you write a new single-file React component that the client will dynamically import at runtime. Tier 2 components exist for STATE and LOGIC (ticking clocks, canvas animations, capability-backed data views) — static visuals are composed as node trees without you.
 
 Source constraints (enforced by static checks — violations are rejected):
 - TypeScript/TSX, ONE file, exactly one default-exported function component.
@@ -213,52 +295,58 @@ Source constraints (enforced by static checks — violations are rejected):
     const data = await call("/search?q=cats");       // GET; returns parsed JSON body
     await call("/save", { method: "POST", headers: {"Content-Type":"application/json"}, body: JSON.stringify({...}) });
 - FORBIDDEN: fetch, XMLHttpRequest, WebSocket, localStorage, sessionStorage, document.cookie, eval, dynamic import().
-- Style with inline styles (the shell has no CSS framework). Keep the component self-contained and defensive (loading/error states).
+- Style with inline styles ONLY — the shell has no CSS framework and no utility classes. Design distinctively: pick a palette and typography that fit the purpose; never assume a white background.
 - If this component is meant to be a full-screen/background visual, its root element must FILL its container: use width:"100%", height:"100%" (or 100vw/100vh) and position it to cover the area — never a fixed pixel box. For animation, use requestAnimationFrame or CSS animations/transforms (e.g. a 35° tilt via transform: "rotateX(35deg)" / perspective).
-- Props arrive already-resolved from the widget JSON. Describe them in propsSchema (plain JSON Schema).
+- Props arrive already-resolved from the widget JSON. Describe them in propsSchemaJson (a JSON-encoded JSON Schema string).`;
 
-Available capabilities the component may call with useCapability:
-${capabilityIndex(capabilities)}
-
-Respond with ONLY a JSON object (no prose, no markdown fence) matching this JSON Schema (put the full source code in the "source" string):
-${js(ComponentSpecSchema)}`;
+export function tier2System(
+  capabilities: CapabilityRow[],
+  attachments: Attachment[] = [],
+): SystemPrompt {
+  const attachSection = attachmentSection(attachments);
+  return {
+    stable: TIER2_STABLE,
+    volatile: `${attachSection ? `${attachSection}\n\n` : ""}Available capabilities the component may call with useCapability:
+${capabilityIndex(capabilities)}`,
+  };
 }
 
 /* ------------------------------------------------------------------ */
 /* Tier 1 — widget composition                                         */
 /* ------------------------------------------------------------------ */
 
-export function tier1System(
-  components: ComponentRow[],
-  capabilities: CapabilityRow[],
-  attachments: Attachment[] = [],
-): string {
-  const attachSection = attachmentSection(attachments);
-  return `${CONTEXT}
+const TIER1_STABLE = `${CONTEXT}
 
-You are the TIER 1 composer: you produce the widget JSON (WidgetDefinition) the client renders.
-${attachSection ? `\n${attachSection}\nPass attachment URLs as props to the generated component that renders them.\n` : ""}
+You are the TIER 1 composer: you produce the widget definition the client renders. You are the DESIGNER — every widget should look intentionally crafted for its purpose, not like a template.
 
-${BUILTIN_DOC}
-
-Generated components (use the full key as ComponentNode.type, e.g. "Image@1", and pass props per their schema):
-${componentIndex(components)}
-
-Available capabilities (list keys used by the widget's generated components in requiresCapabilities):
-${capabilityIndex(capabilities)}
+${NODE_DOC}
 
 Rules:
 - "id" is a short kebab-case slug for the feature; "version" is 1.
 - "description" must paraphrase the user's request in plain words (it powers cache matching for future similar requests).
-- ComponentNode.type must be a built-in primitive name or a generated component key listed above — nothing else.
+- element tags must come from the allowlist above; component names must be a built-in name or a generated component key from the registry below.
+- Use a generated component ONLY when its description matches what the widget needs — NEVER repurpose an unrelated component (a countdown timer is not an audio player). If nothing matches, build the feature from element nodes (e.g. an <audio controls> element) rather than misusing a component.
+- BUILD EXACTLY WHAT WAS ASKED — nothing extra. No demo inputs, sample content, filler sections, or "preview" elements the user didn't request. A switch widget is JUST the switch; if it controls another widget, that other widget already exists — do not duplicate it locally. This includes visual chrome: a bare-control request renders on a transparent background with no panel and no title (see DESIGN SCOPE).
 - "requiresComponents" must list exactly the generated component keys used in the tree ([] if none).
 - "requiresCapabilities" must list the capability keys the widget depends on ([] if none).
 - Include "dataSchema" ONLY when the widget stores user-entered rows (todos, notes, habits...). Fields with type string/number/boolean; booleans should default to false.
-- placement: "pinned" for floating overlay widgets (root must be Overlay); "background" for full-viewport-behind-everything requests (root component fills 100% width+height); otherwise "flow".
-- Every valid available prop/binding/action is described above; do not invent others.
+- Set "presentation" deliberately: placement/anchor/order per the user's positional wording; surface "none" unless a neutral card genuinely fits; background widgets' root fills 100%.
 
-Respond with ONLY a JSON object (no prose, no markdown fence) matching this JSON Schema:
-${js(WidgetDefinitionSchema)}
+Your response's "definitionJson" field must contain the complete WidgetDefinition as a JSON-encoded string. Emit it MINIFIED (single line, no indentation) and double-check every inner quote is escaped — the string must JSON.parse cleanly. It must match this JSON Schema exactly:
+${js(WidgetDefinitionSchema)}`;
 
-Built-in component names for reference: ${BUILTIN_COMPONENTS.join(", ")}.`;
+export function tier1System(
+  components: ComponentRow[],
+  capabilities: CapabilityRow[],
+  attachments: Attachment[] = [],
+): SystemPrompt {
+  const attachSection = attachmentSection(attachments);
+  return {
+    stable: TIER1_STABLE,
+    volatile: `${attachSection ? `${attachSection}\nUse the attachment URLs directly in element src/href attrs.\n\n` : ""}Generated components (use the full key as the component name, e.g. "Image@1", and pass props per their schema):
+${componentIndex(components)}
+
+Available capabilities (list keys used by the widget's generated components in requiresCapabilities):
+${capabilityIndex(capabilities)}`,
+  };
 }

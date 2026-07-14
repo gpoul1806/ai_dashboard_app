@@ -28,6 +28,8 @@ export function componentsRouter(db: Db): Router {
       const component = await db.getComponent(req.params.key);
       if (!component) throw new HttpError(404, "component not found");
       res.type("application/javascript");
+      // Keys are versioned and content never mutates — cache forever client-side.
+      res.set("Cache-Control", "public, max-age=31536000, immutable");
       // Generated modules import bare "react" / "@shell/hooks", resolved by the
       // client's import map to the shell's single React instance + hooks.
       res.send(component.builtJs);

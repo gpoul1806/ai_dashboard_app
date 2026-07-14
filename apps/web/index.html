@@ -3,7 +3,21 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>My Day — Generative Dashboard</title>
+    <!--
+      CSP backstop for the generative UI: even if a hostile node slipped past
+      the dual-side sanitizer, it could not run script or embed frames/objects.
+      script-src stays same-origin (generated Tier-2 modules load from
+      /api/components via the dev proxy). 'unsafe-inline' is required by the
+      import map + Vite dev preamble; inline event handlers are still dead —
+      the sanitizer strips on* attrs and React never renders them from JSON.
+      style 'unsafe-inline' is the design surface itself (LLM inline styles).
+      media/img allow https + data:image for LLM-referenced public assets.
+    -->
+    <meta
+      http-equiv="Content-Security-Policy"
+      content="default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; img-src 'self' https: data:; media-src 'self' https: data:; connect-src 'self' ws: wss:; object-src 'none'; frame-src 'none'; base-uri 'none'; form-action 'none'"
+    />
+    <title>Add Features — Generative Dashboard</title>
     <!--
       Import map for GENERATED components (Tier 2). They are served raw from
       /api/components/*.js and import bare "react": the browser resolves that

@@ -2,64 +2,33 @@ import {
   BUILTIN_COMPONENTS,
   CapabilitySpecSchema,
   type CapabilitySpec,
-  type ComponentNode,
   ComponentSpecSchema,
   type ComponentSpec,
   PlanSchema,
   type Plan,
+  type UINode,
   WidgetDefinitionSchema,
   type WidgetDefinition,
+  sanitizeTree,
 } from "@myday/schema";
 // esbuild: transpiles/validates generated TSX before storage — never executed here.
 import { transform } from "esbuild";
+// jsonrepair: the widget tree travels as a JSON-encoded string inside the
+// structured output (the grammar can't express recursion), and models slip on
+// deep quote-escaping — repair recovers those before burning the LLM retry.
+import { jsonrepair } from "jsonrepair";
+import type { Tier1Wire, Tier2Wire } from "./wire";
 
 /**
- * ALL LLM output is validated (Zod / esbuild / static checks) before storage
- * or execution. Failures return readable error lists that are appended to the
- * retry prompt.
+ * ALL LLM output is validated (Zod / sanitizer / esbuild / static checks)
+ * before storage or execution. Failures return readable error lists that are
+ * appended to the retry prompt. JSON syntax itself is grammar-guaranteed by
+ * structured outputs — except the definitionJson string field, parsed here.
  */
 
 export type Validated<T> =
   | { ok: true; value: T }
   | { ok: false; errors: string[] };
-
-/* ------------------------------------------------------------------ */
-/* JSON extraction                                                     */
-/* ------------------------------------------------------------------ */
-
-/** Extracts the first balanced JSON object from LLM text (tolerates fences/prose). */
-export function extractJson(text: string): Validated<unknown> {
-  const cleaned = text.replace(/```(?:json)?/g, "");
-  const start = cleaned.indexOf("{");
-  if (start === -1) return { ok: false, errors: ["no JSON object found in response"] };
-
-  let depth = 0;
-  let inString = false;
-  let escaped = false;
-  for (let i = start; i < cleaned.length; i++) {
-    const ch = cleaned[i];
-    if (inString) {
-      if (escaped) escaped = false;
-      else if (ch === "\\") escaped = true;
-      else if (ch === '"') inString = false;
-      continue;
-    }
-    if (ch === '"') inString = true;
-    else if (ch === "{") depth++;
-    else if (ch === "}") {
-      depth--;
-      if (depth === 0) {
-        const candidate = cleaned.slice(start, i + 1);
-        try {
-          return { ok: true, value: JSON.parse(candidate) };
-        } catch (err) {
-          return { ok: false, errors: [`invalid JSON: ${(err as Error).message}`] };
-        }
-      }
-    }
-  }
-  return { ok: false, errors: ["unterminated JSON object in response"] };
-}
 
 function zodErrors(error: { issues: Array<{ path: PropertyKey[]; message: string }> }): string[] {
   return error.issues.map(
@@ -92,8 +61,17 @@ export function validatePlan(raw: unknown): Validated<Plan> {
         ],
       };
     }
-  } else if (!plan.widgetPlan.trim()) {
-    return { ok: false, errors: ["widgetPlan: required when feasible is true"] };
+  } else if (
+    !plan.widgetPlan.trim() &&
+    plan.moreWidgetPlans.every((p) => !p.trim()) &&
+    plan.updatePlans.length === 0
+  ) {
+    return {
+      ok: false,
+      errors: [
+        "widgetPlan: required when feasible is true (or provide updatePlans when modifying existing widgets)",
+      ],
+    };
   }
   return { ok: true, value: plan };
 }
@@ -102,13 +80,20 @@ export function validatePlan(raw: unknown): Validated<Plan> {
 /* Tier 1 — WidgetDefinition                                           */
 /* ------------------------------------------------------------------ */
 
-function collectNodeTypes(node: ComponentNode, out: Set<string>): void {
-  out.add(node.type);
-  for (const child of node.children ?? []) collectNodeTypes(child, out);
-  // itemTemplate is a nested ComponentNode carried in props.
-  const template = node.props?.itemTemplate as ComponentNode | undefined;
-  if (template && typeof template === "object" && typeof template.type === "string") {
-    collectNodeTypes(template, out);
+const ACTION_RE =
+  /^(addRow|deleteRow|clearForm|toggleRow:.+|setView:[a-z0-9-]+|toggleGlobal:[a-z0-9-]+|setGlobal:[a-z0-9-]+=.*)$/;
+
+/** Walks a UINode tree collecting component names, action strings, and
+ *  itemTemplate subtrees (a UINode carried in component props). */
+function walkNodes(node: UINode, visit: (n: UINode) => void): void {
+  visit(node);
+  if (node.kind === "text") return;
+  for (const child of node.children ?? []) walkNodes(child, visit);
+  if (node.kind === "component") {
+    const template = node.props?.itemTemplate as UINode | undefined;
+    if (template && typeof template === "object" && typeof template.kind === "string") {
+      walkNodes(template, visit);
+    }
   }
 }
 
@@ -122,30 +107,60 @@ export function validateWidgetDefinition(
   const def = parsed.data;
   const errors: string[] = [];
   const builtins = new Set<string>(BUILTIN_COMPONENTS);
-  const used = new Set<string>();
-  collectNodeTypes(def.root, used);
+  const usedGenerated = new Set<string>();
 
-  const usedGenerated: string[] = [];
-  for (const type of used) {
-    if (builtins.has(type)) continue;
-    if (generatedComponentKeys.has(type)) {
-      usedGenerated.push(type);
-      continue;
+  walkNodes(def.root, (n) => {
+    if (n.kind === "component") {
+      if (builtins.has(n.component)) return;
+      if (generatedComponentKeys.has(n.component)) {
+        usedGenerated.add(n.component);
+        return;
+      }
+      errors.push(
+        `root: component "${n.component}" is neither a built-in nor an existing generated component key`,
+      );
+    } else if (n.kind === "element" && n.action && !ACTION_RE.test(n.action)) {
+      errors.push(
+        `root: element action "${n.action}" is invalid (addRow | deleteRow | clearForm | toggleRow:<field> | setView:<view>)`,
+      );
     }
-    errors.push(
-      `root: node type "${type}" is neither a built-in primitive nor an existing generated component key`,
-    );
-  }
+  });
 
-  if (def.placement === "pinned" && def.root.type !== "Overlay") {
-    errors.push(`placement: pinned widgets must use an Overlay root node`);
-  }
+  // Security gate: strict sanitation — any disallowed tag/attr/URL/style is a
+  // validation error fed back to the LLM retry, never stored.
+  const { violations } = sanitizeTree(def.root, "strict");
+  errors.push(...violations);
 
   if (errors.length > 0) return { ok: false, errors };
 
   // Normalize: requiresComponents is exactly the generated keys used.
-  def.requiresComponents = usedGenerated.sort();
+  def.requiresComponents = [...usedGenerated].sort();
   return { ok: true, value: def };
+}
+
+/** Tier-1 wire adapter: definitionJson (string) → parsed + validated definition. */
+export function validateTier1Wire(
+  wire: Tier1Wire,
+  generatedComponentKeys: Set<string>,
+): Validated<WidgetDefinition> {
+  let raw: unknown;
+  try {
+    raw = JSON.parse(wire.definitionJson);
+  } catch (err) {
+    // Escaping slips deep inside the string are the common failure — attempt a
+    // lenient repair before spending the LLM retry. The repaired tree still
+    // passes full Zod + strict sanitation below, so nothing unsafe gets in.
+    try {
+      raw = JSON.parse(jsonrepair(wire.definitionJson));
+      console.warn("[tier1] definitionJson needed jsonrepair — recovered");
+    } catch {
+      return {
+        ok: false,
+        errors: [`definitionJson: invalid JSON — ${(err as Error).message}`],
+      };
+    }
+  }
+  return validateWidgetDefinition(raw, generatedComponentKeys);
 }
 
 /* ------------------------------------------------------------------ */
@@ -205,6 +220,31 @@ export async function validateComponentSpec(
       ) ?? [`source (build): ${(err as Error).message}`];
     return { ok: false, errors: messages };
   }
+}
+
+/** Tier-2 wire adapter: propsSchemaJson (string) → parsed spec, then full validation. */
+export async function validateTier2Wire(
+  wire: Tier2Wire,
+): Promise<Validated<ComponentSpec & { builtJs: string }>> {
+  let propsSchema: unknown = {};
+  if (wire.propsSchemaJson.trim() && wire.propsSchemaJson.trim() !== "{}") {
+    try {
+      propsSchema = JSON.parse(wire.propsSchemaJson);
+    } catch (err) {
+      return {
+        ok: false,
+        errors: [`propsSchemaJson: invalid JSON — ${(err as Error).message}`],
+      };
+    }
+  }
+  return validateComponentSpec({
+    id: wire.id,
+    name: wire.name,
+    version: wire.version,
+    description: wire.description,
+    propsSchema,
+    source: wire.source,
+  });
 }
 
 /* ------------------------------------------------------------------ */

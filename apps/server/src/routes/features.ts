@@ -1,4 +1,4 @@
-import { AttachmentSchema } from "@myday/schema";
+import { AttachmentSchema, type RequestOutcome } from "@myday/schema";
 import { Router } from "express";
 import { z } from "zod";
 import type { Db, FeatureRow } from "../db";
@@ -61,26 +61,40 @@ export function featuresRouter(db: Db, orchestrator: Orchestrator): Router {
           attachments,
           ac.signal,
         );
-        // A declined request is a normal (200) outcome, not an error — the
-        // client shows a toast + the LLM's collapsible explanation.
+        // Every outcome — including a decline — is a normal 200 wrapped in the
+        // generic RequestOutcome envelope (discriminated by "outcome").
+        let outcome: RequestOutcome;
         if (result.status === "declined") {
-          res.json({ declined: true, reason: result.reason });
+          outcome = { outcome: "declined", userFacingReason: result.reason };
         } else if (result.status === "removed") {
-          res.json({ removed: result.removed });
+          outcome = { outcome: "removed", removedWidgets: result.removed };
         } else {
-          res.json({
-            declined: false,
-            feature: toApi(result.feature),
-            cached: result.cached,
-            pendingApprovals: result.pendingApprovals,
-          });
+          outcome = {
+            outcome: "created",
+            artifact: { kind: "widget", feature: toApi(result.feature) },
+            servedFromCache: result.cached,
+            pendingCapabilityApprovals: result.pendingApprovals,
+          };
         }
+        res.json(outcome);
       } catch (err) {
         if (ac.signal.aborted) return; // client cancelled — nothing to send back
         throw err;
       } finally {
         res.off("close", onClose);
       }
+    } catch (err) {
+      next(err);
+    }
+  });
+
+  // "Clear all": empties the dashboard (user_layouts) but keeps every feature,
+  // component, and capability cached — a later similar request is served
+  // instantly from cache and re-surfaces the widget.
+  router.post("/clear", async (_req, res, next) => {
+    try {
+      const cleared = await db.clearLayout();
+      res.json({ cleared });
     } catch (err) {
       next(err);
     }

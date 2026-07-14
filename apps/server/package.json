@@ -4,7 +4,7 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "dev": "tsx watch src/index.ts",
+    "dev": "tsx watch --include \"../../packages/schema/src/**/*.ts\" src/index.ts",
     "start": "tsx src/index.ts",
     "typecheck": "tsc -p tsconfig.json",
     "test": "vitest run"
@@ -17,6 +17,7 @@
     "dotenv": "^16.4.5",
     "esbuild": "^0.25.0",
     "express": "^4.21.2",
+    "jsonrepair": "^3.15.0",
     "zod": "^4.0.0"
   },
   "optionalDependencies": {

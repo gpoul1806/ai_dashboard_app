@@ -1,20 +1,10 @@
-import type { Attachment, WidgetDefinition } from "@myday/schema";
+import type { Attachment, FeatureRecord, RequestOutcome } from "@myday/schema";
 
-export type { Attachment } from "@myday/schema";
+export type { Attachment, FeatureRecord, RequestOutcome } from "@myday/schema";
 
 export interface DataRow {
   id: string;
   row: Record<string, unknown>;
-}
-
-export interface FeatureRecord {
-  id: string;
-  slug: string;
-  name: string;
-  description: string;
-  version: number;
-  definition: WidgetDefinition;
-  createdAt?: string;
 }
 
 export interface ComponentRecord {
@@ -32,23 +22,6 @@ export interface CapabilityRecord {
   reviewRequired: boolean;
   approved: boolean;
 }
-
-export type RequestFeatureResult =
-  | {
-      declined: false;
-      feature: FeatureRecord;
-      cached: boolean;
-      pendingApprovals: string[];
-    }
-  | {
-      declined: true;
-      /** LLM-authored explanation of exactly why the request couldn't be built. */
-      reason: string;
-    }
-  | {
-      /** Widgets removed from the dashboard by this request. */
-      removed: Array<{ id: string; name: string }>;
-    };
 
 async function http<T>(path: string, init?: RequestInit): Promise<T> {
   const res = await fetch(path, {
@@ -102,7 +75,7 @@ export const api = {
     text: string,
     attachments: Attachment[] = [],
     signal?: AbortSignal,
-  ): Promise<RequestFeatureResult> {
+  ): Promise<RequestOutcome> {
     return http("/api/features/request", {
       method: "POST",
       body: JSON.stringify({ text, attachments }),
@@ -111,6 +84,10 @@ export const api = {
   },
   listFeatures(): Promise<FeatureRecord[]> {
     return http("/api/features");
+  },
+  /** Empties the dashboard; everything stays cached server-side for instant reuse. */
+  clearDashboard(): Promise<{ cleared: number }> {
+    return http("/api/features/clear", { method: "POST" });
   },
   listComponents(): Promise<ComponentRecord[]> {
     return http("/api/components");

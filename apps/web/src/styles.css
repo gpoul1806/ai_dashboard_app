@@ -4,7 +4,9 @@ body {
   margin: 0;
   font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
   background: #f2f0eb;
-  color: #24211c;
+  /* Primary text color: black — widget texts without an explicit color
+     inherit this. */
+  color: #000;
 }
 
 /* App content sits above the full-viewport background layer. */
@@ -28,6 +30,10 @@ body {
   padding: 28px 32px 16px;
   border-bottom: 1px solid #ddd8ce;
   background: #faf8f4;
+  /* Always above pinned widgets (their zIndex is clamped to ≤ 40) — nothing
+     generated may ever cover the request bar. */
+  position: relative;
+  z-index: 50;
 }
 .app-header h1 { margin: 0 0 12px; font-size: 22px; }
 
@@ -49,6 +55,9 @@ body {
   border-radius: 8px;
   font-size: 15px;
   background: #fff;
+  font-family: inherit;
+  line-height: 1.4;
+  resize: none; /* fixed 2-row textarea; Shift+Enter adds lines */
 }
 .attach-btn {
   flex: 0 0 auto;
@@ -74,6 +83,16 @@ body {
   cursor: pointer;
 }
 .cancel-btn:hover { background: #fbeceb; }
+
+/* "Clear all" — secondary/outline so it never competes with Add. Overrides the
+   shared `.ask button` fill below (that rule targets the primary action). */
+.ask button.clear-all-btn {
+  flex: 0 0 auto;
+  border: 1px solid #c9c2b4;
+  background: #fff;
+  color: #6a6152;
+}
+.ask button.clear-all-btn:hover:not(:disabled) { background: #f3efe7; }
 
 .attachments {
   display: flex;
@@ -132,60 +151,33 @@ body {
 
 .dashboard {
   display: grid;
-  grid-template-columns: repeat(auto-fill, minmax(340px, 1fr));
+  grid-template-columns: repeat(auto-fill, minmax(200px, 1fr));
   gap: 20px;
   padding: 24px 32px;
 }
+/* Widgets are CONTENT-SIZED by default — the slot shrink-wraps the element
+   (a bare switch occupies 56×30, not the whole grid track). Widgets that
+   should fill their cell opt in via presentation.size.width ("100%"),
+   applied inline by the shell. */
+.widget-slot {
+  width: fit-content;
+  max-width: 100%;
+  height: fit-content;
+}
 .empty-dash { grid-column: 1 / -1; text-align: center; padding: 60px 0; }
 
-/* ---- primitives ---- */
-.ui-card {
+/* ---- widgets: NO imposed chrome ----
+   All widget visuals are LLM-authored inline styles. The shell keeps only:
+   an opt-in neutral surface, the unknown-component box, and load states. */
+
+/* Opt-in neutral card, used only when presentation.surface === "card". */
+.widget-surface {
   background: #fff;
   border: 1px solid #e3ddd1;
   border-radius: 12px;
   padding: 16px 18px;
   box-shadow: 0 1px 3px rgba(40, 30, 10, 0.05);
 }
-.ui-card-title { margin: 0 0 12px; font-size: 16px; }
-.ui-card-body { display: flex; flex-direction: column; gap: 10px; }
-
-.ui-input, .ui-select {
-  padding: 8px 10px;
-  border: 1px solid #c9c2b4;
-  border-radius: 6px;
-  font-size: 14px;
-  flex: 1;
-  min-width: 0;
-}
-.ui-button {
-  padding: 8px 14px;
-  border: none;
-  border-radius: 6px;
-  background: #3c5a46;
-  color: #fff;
-  font-size: 14px;
-  cursor: pointer;
-  white-space: nowrap;
-}
-.ui-button:hover { filter: brightness(1.1); }
-
-.ui-list { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 6px; }
-.ui-list-item { padding: 6px 8px; border-radius: 6px; background: #f7f5f0; }
-.ui-empty { color: #8a836f; font-size: 14px; padding: 8px 0; }
-
-.ui-checkbox { display: inline-flex; align-items: center; gap: 6px; cursor: pointer; }
-
-.ui-text-title { font-weight: 600; font-size: 16px; }
-.ui-text-muted { color: #8a836f; font-size: 13px; }
-
-.ui-counter { display: flex; align-items: baseline; gap: 8px; }
-.ui-counter-value { font-size: 28px; font-weight: 700; }
-.ui-counter-label { color: #8a836f; }
-
-.ui-progress-wrap { display: flex; align-items: center; gap: 10px; }
-.ui-progress { flex: 1; height: 8px; background: #e7e2d6; border-radius: 4px; overflow: hidden; }
-.ui-progress-fill { height: 100%; background: #b4552d; transition: width 0.2s; }
-.ui-progress-label { font-size: 12px; color: #8a836f; min-width: 34px; }
 
 .ui-missing {
   border: 1px dashed #c66;
@@ -194,15 +186,6 @@ body {
   border-radius: 6px;
   font-size: 13px;
 }
-
-/* ---- overlay slot ---- */
-.overlay-layer { position: fixed; inset: 0; pointer-events: none; z-index: 50; }
-.ui-overlay { position: fixed; pointer-events: auto; max-width: 320px; }
-.ui-overlay-top-right { top: 16px; right: 16px; }
-.ui-overlay-top-left { top: 16px; left: 16px; }
-.ui-overlay-bottom-right { bottom: 72px; right: 16px; }
-.ui-overlay-bottom-left { bottom: 72px; left: 16px; }
-.ui-overlay-center { top: 50%; left: 50%; transform: translate(-50%, -50%); }
 
 /* ---- widget states ---- */
 .widget-loading, .widget-error {

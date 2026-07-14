@@ -1,5 +1,118 @@
 import { describe, expect, it } from "vitest";
-import { validateCapabilitySpec } from "./validators";
+import {
+  validateCapabilitySpec,
+  validateTier1Wire,
+  validateWidgetDefinition,
+} from "./validators";
+
+const NO_GENERATED = new Set<string>();
+
+describe("validateWidgetDefinition — free-form trees", () => {
+  const def = (root: unknown) => ({
+    id: "w",
+    name: "W",
+    description: "w",
+    version: 1,
+    root,
+  });
+
+  it("accepts a styled element tree with media", () => {
+    const result = validateWidgetDefinition(
+      def({
+        kind: "element",
+        tag: "section",
+        style: { background: "#111", color: "#fff" },
+        children: [
+          { kind: "element", tag: "audio", attrs: { src: "/uploads/a.mp3", controls: true } },
+        ],
+      }),
+      NO_GENERATED,
+    );
+    expect(result.ok).toBe(true);
+  });
+
+  it("rejects event-handler attributes (strict sanitize)", () => {
+    const result = validateWidgetDefinition(
+      def({ kind: "element", tag: "img", attrs: { src: "/x.png", onerror: "alert(1)" } }),
+      NO_GENERATED,
+    );
+    expect(result.ok).toBe(false);
+    if (!result.ok) expect(result.errors.join(" ")).toMatch(/onerror/);
+  });
+
+  it("rejects disallowed tags", () => {
+    const result = validateWidgetDefinition(
+      def({ kind: "element", tag: "iframe" }),
+      NO_GENERATED,
+    );
+    expect(result.ok).toBe(false);
+  });
+
+  it("rejects unknown component names but accepts registered generated keys", () => {
+    const bad = validateWidgetDefinition(
+      def({ kind: "component", component: "Mystery" }),
+      NO_GENERATED,
+    );
+    expect(bad.ok).toBe(false);
+
+    const good = validateWidgetDefinition(
+      def({ kind: "component", component: "Image@1" }),
+      new Set(["Image@1"]),
+    );
+    expect(good.ok).toBe(true);
+    if (good.ok) expect(good.value.requiresComponents).toEqual(["Image@1"]);
+  });
+
+  it("rejects invalid action strings on elements", () => {
+    const result = validateWidgetDefinition(
+      def({ kind: "element", tag: "div", action: "dropTables" }),
+      NO_GENERATED,
+    );
+    expect(result.ok).toBe(false);
+  });
+});
+
+describe("validateTier1Wire — definitionJson transport", () => {
+  it("still fails (with readable retry errors) when the JSON is garbage", () => {
+    // jsonrepair may coerce fragments into *some* JSON, but the result then
+    // fails Zod validation — either way the errors ride the retry loop.
+    const result = validateTier1Wire({ definitionJson: "{ nope" }, NO_GENERATED);
+    expect(result.ok).toBe(false);
+    if (!result.ok) expect(result.errors.length).toBeGreaterThan(0);
+  });
+
+  it("repairs recoverable escaping slips instead of burning the retry", () => {
+    const good = {
+      id: "w",
+      name: "W",
+      description: "w",
+      version: 1,
+      root: { kind: "text", value: "hi" },
+    };
+    // A trailing comma — invalid JSON.parse, trivially repairable.
+    const broken = JSON.stringify(good).slice(0, -1) + ",}";
+    const result = validateTier1Wire({ definitionJson: broken }, NO_GENERATED);
+    expect(result.ok).toBe(true);
+  });
+
+  it("parses and validates a definition riding as a JSON string", () => {
+    const result = validateTier1Wire(
+      {
+        definitionJson: JSON.stringify({
+          id: "w",
+          name: "W",
+          description: "w",
+          version: 1,
+          presentation: { placement: "pinned", anchor: "bottom-right" },
+          root: { kind: "text", value: "hi" },
+        }),
+      },
+      NO_GENERATED,
+    );
+    expect(result.ok).toBe(true);
+    if (result.ok) expect(result.value.presentation.anchor).toBe("bottom-right");
+  });
+});
 
 const base = {
   id: "demo-cap",

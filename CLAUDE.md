@@ -1,4 +1,4 @@
-# CLAUDE.md — "My Day" Fully Generative Dashboard
+# CLAUDE.md — "Add Features" Fully Generative Dashboard
 
 ## Project Overview
 
@@ -66,9 +66,7 @@ User request
 
 ## The Three Generation Tiers
 
-### Tier 1 — Widget JSON (composition)
-
-Same contract as before:
+### Tier 1 — Widget JSON (free-form composition)
 
 ```typescript
 type WidgetDefinition = {
@@ -76,15 +74,46 @@ type WidgetDefinition = {
   name: string;
   description: string;
   version: number;
-  root: ComponentNode;              // tree of component types
+  root: UINode;                     // generic node tree (see below)
+  presentation: {                   // position-aware, chrome is OPT-IN
+    placement: "flow" | "pinned" | "background";
+    anchor?: "top-left" | … | "bottom-right"; // 9 regions, pinned widgets
+    order?: number;                 // position in the flow grid (0 = first)
+    zIndex?: number;
+    surface: "none" | "card";       // default "none" — the shell imposes NO chrome
+    view?: string;                  // named view/tab this widget belongs to; omit = GLOBAL
+    size?: { gridColumnSpan?; width?; height? };
+  };
   requiresComponents: string[];     // e.g. ["Image@1"] — client loads these before render
   requiresCapabilities: string[];   // e.g. ["giphy-search@1"]
   dataSchema?: Record<string, DataField>;
-  placement?: "flow" | "pinned";    // pinned widgets render in the Overlay slot
 };
+
+// The generic content tree — media travels as native element nodes.
+type UINode =
+  | { kind: "text"; value: string | number | Binding }
+  | { kind: "element"; tag: string;           // ANY allowlisted HTML/SVG tag (video, audio, img, svg…)
+      attrs?: Record<string, ...|Binding>;    // src, controls, autoplay, loop, muted, poster…
+      style?: Record<string, string|number>;  // LLM-authored camelCase inline CSS
+      action?: string; children?: UINode[] }
+  | { kind: "component"; component: string; props?; children? }; // built-in or "Image@1"
 ```
 
-- Component `type` may be a built-in primitive OR a generated component id.
+- Element trees are sanitized on BOTH sides (`@myday/schema/sanitize`): strict at server
+  validation (violations feed the LLM retry), strip at every client render, + a CSP backstop.
+- LLM transport is STRUCTURED OUTPUT (`messages.parse` + `zodOutputFormat`) — flat wire
+  schemas; the recursive tree rides as a `definitionJson` string (the structured-output
+  grammar can't express recursion/open records), parsed + Zod-validated server-side with
+  `jsonrepair` recovery. Prompt caching (`cache_control`) on the stable system block.
+- The HTTP envelope is `RequestOutcome`, discriminated by `outcome`:
+  `created` (artifact.kind "widget") | `declined` (userFacingReason) | `removed`.
+- APP-SCOPE features are first-class: requests touching the whole app (global menus,
+  backgrounds, tabs/pages) plan MULTIPLE widgets in one request (`widgetPlan` +
+  `moreWidgetPlans`), re-home existing widgets via the plan's `viewAssignments`, and use
+  views: `presentation.view` scopes a widget to a tab; widgets without `view` are global;
+  the `setView:<name>` action (usable on any element) switches the app-wide active view
+  (landing view = "home"). The dashboard (user_layouts) is separate from the feature
+  cache (features): "Clear all" empties the layout only; cache hits re-surface widgets.
 - Zod-validate ALWAYS. One retry with errors appended, then friendly failure.
 
 ### Tier 2 — Generated UI components

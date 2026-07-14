@@ -8,12 +8,14 @@ import {
   capabilityKey,
   componentKey,
 } from "@myday/schema";
+import type { z } from "zod";
 import { config } from "../config";
 import type { CapabilityRow, ComponentRow, Db, FeatureRow } from "../db";
 import {
   explainFailure,
-  generateText,
+  generateObject,
   type ImageInput,
+  type SystemPrompt,
   llmAvailable,
 } from "../llm/client";
 import {
@@ -24,12 +26,17 @@ import {
 } from "../llm/prompts";
 import {
   type Validated,
-  extractJson,
   validateCapabilitySpec,
-  validateComponentSpec,
   validatePlan,
-  validateWidgetDefinition,
+  validateTier1Wire,
+  validateTier2Wire,
 } from "../llm/validators";
+import {
+  PlanWireSchema,
+  Tier1WireSchema,
+  Tier2WireSchema,
+  Tier3WireSchema,
+} from "../llm/wire";
 import type { SandboxRuntime } from "../sandbox";
 
 export type OrchestratorResult =
@@ -60,12 +67,18 @@ function looksLikeManagement(text: string): boolean {
   );
 }
 
-/** Runs an LLM generation step with one retry (errors appended), then fails. */
-async function generateValidated<T>(
+/**
+ * Runs an LLM generation step with one retry (errors appended), then fails.
+ * The response is structured output (grammar-constrained to the wire schema),
+ * so JSON syntax can never fail — retries only fire on semantic/sanitizer
+ * violations reported by `validate`.
+ */
+async function generateValidated<W, T>(
   step: string,
-  system: string,
+  system: SystemPrompt,
   user: string,
-  validate: (raw: unknown) => Validated<T> | Promise<Validated<T>>,
+  wireSchema: z.ZodType<W>,
+  validate: (wire: W) => Validated<T> | Promise<Validated<T>>,
   onLog: (tokens: number, retries: number, success: boolean) => void,
   images: ImageInput[] = [],
   signal?: AbortSignal,
@@ -80,13 +93,19 @@ async function generateValidated<T>(
     const prompt =
       attempt === 0
         ? user
-        : `${user}\n\nYour previous response was invalid. Fix these problems and return corrected JSON only:\n${lastErrors
+        : `${user}\n\nYour previous response was invalid. Fix these problems and return a corrected response:\n${lastErrors
             .map((e) => `- ${e}`)
             .join("\n")}`;
-    let text: string;
+    let wire: W;
     let tokens: number;
     try {
-      ({ text, tokens } = await generateText({ system, user: prompt, images: useImages, signal }));
+      ({ value: wire, tokens } = await generateObject({
+        system,
+        user: prompt,
+        schema: wireSchema,
+        images: useImages,
+        signal,
+      }));
     } catch (err) {
       if (signal?.aborted) throw err; // client cancelled — propagate, don't retry
       if (useImages.length > 0) {
@@ -101,12 +120,7 @@ async function generateValidated<T>(
     }
     totalTokens += tokens;
 
-    const json = extractJson(text);
-    if (!json.ok) {
-      lastErrors = json.errors;
-      continue;
-    }
-    const result = await validate(json.value);
+    const result = await validate(wire);
     if (result.ok) {
       onLog(totalTokens, attempt, true);
       return result.value;
@@ -114,6 +128,9 @@ async function generateValidated<T>(
     lastErrors = result.errors;
   }
   onLog(totalTokens, 1, false);
+  // Surface the technical validation errors in the server log — the user only
+  // ever sees the friendly explainFailure paraphrase.
+  console.warn(`[${step}] failed after retry:\n${lastErrors.map((e) => `  - ${e}`).join("\n")}`);
   throw new Error(`${step} failed after retry: ${lastErrors.join("; ")}`);
 }
 
@@ -173,6 +190,9 @@ export class Orchestrator {
       const candidates = await this.db.findSimilarFeatures(requestText, 5);
       const best = candidates[0];
       if (best && best.similarity >= config.similarityThreshold) {
+        // The cache outlives the dashboard ("Clear all" only empties the
+        // layout) — re-surface the cached widget.
+        await this.db.addToLayout(best.feature.id);
         await this.log(requestText, "cache", true, true, 0, 0);
         return { status: "ok", feature: best.feature, cached: true, pendingApprovals: [] };
       }
@@ -183,10 +203,11 @@ export class Orchestrator {
     // decline rather than a 500 — the app degrades gracefully.
     let plan: Plan;
     try {
-      plan = await generateValidated<Plan>(
+      plan = await generateValidated(
         "planner",
         plannerSystem(components, capabilities, candidates, currentFeatures, attachments),
         `User request: ${requestText}`,
+        PlanWireSchema,
         validatePlan,
         (tokens, retries, success) =>
           void this.log(requestText, "plan", false, success, retries, tokens),
@@ -229,6 +250,7 @@ export class Orchestrator {
     if (plan.cacheHit) {
       const cached = await this.db.getFeature(plan.cacheHit);
       if (cached) {
+        await this.db.addToLayout(cached.id);
         await this.log(requestText, "cache", true, true, 0, 0);
         return { status: "ok", feature: cached, cached: true, pendingApprovals: [] };
       }
@@ -240,8 +262,25 @@ export class Orchestrator {
     try {
       const pendingApprovals = await this.runTier3(requestText, plan, signal);
       await this.runTier2(requestText, plan, attachments, images, signal);
-      const feature = await this.runTier1(requestText, plan, attachments, signal);
-      return { status: "ok", feature, cached: false, pendingApprovals };
+      const features: FeatureRow[] = [];
+      for (const widgetPlan of [plan.widgetPlan, ...plan.moreWidgetPlans]) {
+        if (!widgetPlan.trim()) continue;
+        features.push(await this.runTier1(requestText, widgetPlan, attachments, signal));
+      }
+      // Modify existing widgets in place (cross-widget wiring, restyles…).
+      const updated = await this.runUpdates(requestText, plan, signal);
+      // Re-home existing widgets onto views (e.g. the current table → "home"
+      // when a tab menu is created). Applied only after the builds succeeded
+      // so a failed pipeline can't strand widgets on invisible views.
+      await this.applyViewAssignments(plan);
+      const primary = features[0] ?? updated[0];
+      if (!primary) {
+        return {
+          status: "declined",
+          reason: "The request didn't produce or change any widget — try rephrasing it.",
+        };
+      }
+      return { status: "ok", feature: primary, cached: false, pendingApprovals };
     } catch (err) {
       if (signal?.aborted) throw err; // client cancelled — let the route drop it
       const technical = err instanceof Error ? err.message : String(err);
@@ -270,10 +309,11 @@ export class Orchestrator {
   ): Promise<string[]> {
     const pendingApprovals: string[] = [];
     for (const need of plan.needsCapabilities) {
-      const spec = await generateValidated<CapabilitySpec>(
+      const spec = await generateValidated(
         "tier3",
         tier3System(),
         `User request: ${requestText}\n\nGenerate this capability: id "${need.id}" — ${need.description}\nUse version 1.`,
+        Tier3WireSchema,
         validateCapabilitySpec,
         (tokens, retries, success) =>
           void this.log(requestText, "tier3", false, success, retries, tokens),
@@ -313,11 +353,12 @@ export class Orchestrator {
     const capabilities = await this.db.listCapabilities();
 
     for (const need of plan.needsComponents) {
-      const spec = await generateValidated<ComponentSpec & { builtJs: string }>(
+      const spec = await generateValidated(
         "tier2",
         tier2System(capabilities, attachments),
         `User request: ${requestText}\n\nGenerate this component: id "${need.id}" — ${need.description}\nUse version 1. If it needs external data, call it through useCapability with one of the available capability keys. If it renders an attachment, take the url as a prop and use it directly in src/href.`,
-        validateComponentSpec,
+        Tier2WireSchema,
+        validateTier2Wire,
         (tokens, retries, success) =>
           void this.log(requestText, "tier2", false, success, retries, tokens),
         images,
@@ -339,9 +380,59 @@ export class Orchestrator {
 
   /* -------------------- Tier 1 -------------------- */
 
-  private async runTier1(
+  private async applyViewAssignments(plan: Plan): Promise<void> {
+    for (const { featureId, view } of plan.viewAssignments) {
+      // Guard against junk assignments ("" or invalid names) — an empty view
+      // must mean "global", which is expressed by NOT assigning, not by "".
+      if (!/^[a-z0-9-]+$/.test(view)) continue;
+      const feature = await this.db.getFeature(featureId);
+      if (!feature) continue;
+      feature.definition.presentation = {
+        ...feature.definition.presentation,
+        view,
+      };
+      await this.db.updateFeatureDefinition(featureId, feature.definition);
+    }
+  }
+
+  /** Regenerates existing widgets in place per plan.updatePlans (same id). */
+  private async runUpdates(
     requestText: string,
     plan: Plan,
+    signal?: AbortSignal,
+  ): Promise<FeatureRow[]> {
+    const updated: FeatureRow[] = [];
+    if (plan.updatePlans.length === 0) return updated;
+    const components = await this.db.listComponents();
+    const capabilities = await this.db.listCapabilities();
+    const componentKeys = new Set(components.map((c) => c.key));
+
+    for (const { featureId, instruction } of plan.updatePlans) {
+      const existing = await this.db.getFeature(featureId);
+      if (!existing) continue;
+      const def = await generateValidated(
+        "tier1",
+        tier1System(components, capabilities),
+        `User request: ${requestText}\n\nUPDATE an existing widget. Its CURRENT definition:\n${JSON.stringify(existing.definition)}\n\nApply exactly this change: ${instruction}\n\nReturn the FULL updated WidgetDefinition — keep the same "id" and "name", keep everything not affected by the change identical, and bump nothing else.`,
+        Tier1WireSchema,
+        (wire) => validateTier1Wire(wire, componentKeys),
+        (tokens, retries, success) =>
+          void this.log(requestText, "tier1", false, success, retries, tokens),
+        [],
+        signal,
+      );
+      def.id = existing.id;
+      def.version = existing.version + 1;
+      await this.db.updateFeatureDefinition(existing.id, def);
+      await this.db.addToLayout(existing.id);
+      updated.push({ ...existing, definition: def });
+    }
+    return updated;
+  }
+
+  private async runTier1(
+    requestText: string,
+    widgetPlan: string,
     attachments: Attachment[],
     signal?: AbortSignal,
   ): Promise<FeatureRow> {
@@ -355,11 +446,12 @@ export class Orchestrator {
             .map((a) => `- ${a.filename}: ${a.url}`)
             .join("\n")}`
         : "";
-    const def = await generateValidated<WidgetDefinition>(
+    const def = await generateValidated(
       "tier1",
       tier1System(components, capabilities, attachments),
-      `User request: ${requestText}\n\nCompose this widget: ${plan.widgetPlan}${attachNote}`,
-      (raw) => validateWidgetDefinition(raw, componentKeys),
+      `User request: ${requestText}\n\nCompose this widget: ${widgetPlan}${attachNote}`,
+      Tier1WireSchema,
+      (wire) => validateTier1Wire(wire, componentKeys),
       (tokens, retries, success) =>
         void this.log(requestText, "tier1", false, success, retries, tokens),
       [],
