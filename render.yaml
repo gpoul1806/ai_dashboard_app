@@ -10,9 +10,11 @@ services:
     name: my-day
     runtime: node
     plan: free # bump to "starter" for an always-on instance (no cold-start spin-down)
-    # --prod=false forces devDependencies (tsx, vite, typescript) to install even
-    # though Render sets NODE_ENV=production; they persist into the run stage.
-    buildCommand: corepack enable && pnpm install --prod=false && pnpm build
+    # Render provisions pnpm from the root package.json "packageManager" field —
+    # do NOT run "corepack enable" (it tries to rewrite /usr/bin on a read-only
+    # image and fails). --prod=false forces devDependencies (tsx, vite,
+    # typescript) to install despite NODE_ENV=production; they persist into run.
+    buildCommand: pnpm install --prod=false && pnpm build
     startCommand: pnpm start
     healthCheckPath: /api/health
     envVars:
