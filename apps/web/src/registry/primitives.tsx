@@ -65,6 +65,22 @@ const Input: React.FC<Props> = ({ name, placeholder, type = "text", style, disab
   );
 };
 
+const Textarea: React.FC<Props> = ({ name, placeholder, rows = 4, style, disabled }) => {
+  const ctx = useWidget();
+  const field = String(name ?? "value");
+  const isDisabled = Boolean(disabled);
+  return (
+    <textarea
+      rows={Number(rows) || 4}
+      style={{ opacity: isDisabled ? 0.5 : 1, fontFamily: "inherit", ...asStyle(style), cursor: isDisabled ? "not-allowed" : "text" }}
+      placeholder={placeholder != null ? String(placeholder) : undefined}
+      value={ctx.form[field] ?? ""}
+      disabled={isDisabled}
+      onChange={(e) => ctx.setFormField(field, e.target.value)}
+    />
+  );
+};
+
 const Button: React.FC<Props> = ({ label, action, style, children, disabled }) => {
   const ctx = useWidget();
   const scope = useScope();
@@ -211,6 +227,7 @@ export const primitives: Record<
   Stack,
   Text,
   Input,
+  Textarea,
   Button,
   List,
   Checkbox,

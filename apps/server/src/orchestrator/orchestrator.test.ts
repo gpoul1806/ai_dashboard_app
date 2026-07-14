@@ -35,6 +35,10 @@ let orchestrator: Orchestrator;
 
 beforeEach(async () => {
   responses.length = 0;
+  // Pin worker concurrency to 1 so the FIFO mock stays deterministic, and
+  // keep tests hermetic (no live media-URL probes).
+  process.env.GENERATION_CONCURRENCY = "1";
+  process.env.SKIP_MEDIA_URL_CHECK = "1";
   db = createMemoryDb();
   sandbox = await createSandbox(makeHostApi(db), "worker");
   orchestrator = new Orchestrator(db, sandbox);
@@ -410,6 +414,86 @@ describe("Orchestrator — app-scope (views) plans", () => {
     expect(JSON.stringify(field?.definition.root)).toContain("$globalNot");
     expect(JSON.stringify(sw?.definition.root)).toContain("toggleGlobal:input-enabled");
     expect(field?.definition.version).toBe(2);
+  });
+
+  it("builds pieces in parallel and isolates a failing piece (partial success)", async () => {
+    // 3 piece-plans; the MIDDLE one is invalid on both attempts.
+    responses.push(
+      {
+        widgetPlan: "piece A",
+        moreWidgetPlans: ["piece B (will fail)", "piece C"],
+      },
+      // A ok
+      tier1Wire({
+        id: "a",
+        name: "A",
+        description: "a",
+        version: 1,
+        root: { kind: "text", value: "a" },
+      }),
+      // B invalid twice (unknown component, no retry fix queued after)
+      tier1Wire({
+        id: "b",
+        name: "B",
+        description: "b",
+        version: 1,
+        root: { kind: "component", component: "DoesNotExist" },
+      }),
+      tier1Wire({
+        id: "b",
+        name: "B",
+        description: "b",
+        version: 1,
+        root: { kind: "component", component: "StillMissing" },
+      }),
+      // C ok
+      tier1Wire({
+        id: "c",
+        name: "C",
+        description: "c",
+        version: 1,
+        root: { kind: "text", value: "c" },
+      }),
+    );
+
+    const result = await orchestrator.handleRequest("build A, B and C");
+    expect(result.status).toBe("ok");
+    if (result.status !== "ok") return;
+    // Two of three pieces built; the failing one is reported, not fatal.
+    expect((await db.listFeatures()).map((f) => f.name).sort()).toEqual(["A", "C"]);
+    expect(result.failedPieces).toHaveLength(1);
+    expect(result.failedPieces[0].plan).toContain("piece B");
+  });
+
+  it("accepts chained actions on the Send button (addRow;setView:home)", async () => {
+    responses.push(
+      { widgetPlan: "a contact form" },
+      tier1Wire({
+        id: "contact",
+        name: "Contact",
+        description: "a contact form",
+        version: 1,
+        presentation: { placement: "flow", view: "contact" },
+        dataSchema: { name: { type: "string" }, email: { type: "string" } },
+        root: {
+          kind: "element",
+          tag: "div",
+          children: [
+            { kind: "component", component: "Input", props: { name: "name" } },
+            {
+              kind: "element",
+              tag: "div",
+              action: "addRow;setView:home",
+              children: [{ kind: "text", value: "Send" }],
+            },
+          ],
+        },
+      }),
+    );
+    const result = await orchestrator.handleRequest("a contact form with a Send button");
+    expect(result.status).toBe("ok");
+    if (result.status !== "ok") return;
+    expect(JSON.stringify(result.feature.definition.root)).toContain("addRow;setView:home");
   });
 
   it("rejects invalid setView action names", async () => {

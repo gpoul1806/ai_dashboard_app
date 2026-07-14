@@ -166,7 +166,7 @@ describe("RequestOutcomeSchema", () => {
     createdAt: new Date(0).toISOString(),
   };
 
-  it("parses the created arm", () => {
+  it("parses the created arm (failedPieces defaults to [])", () => {
     const out = RequestOutcomeSchema.parse({
       outcome: "created",
       artifact: { kind: "widget", feature },
@@ -174,6 +174,18 @@ describe("RequestOutcomeSchema", () => {
       pendingCapabilityApprovals: [],
     });
     expect(out.outcome).toBe("created");
+    if (out.outcome === "created") expect(out.failedPieces).toEqual([]);
+  });
+
+  it("parses the created arm with reported failedPieces", () => {
+    const out = RequestOutcomeSchema.parse({
+      outcome: "created",
+      artifact: { kind: "widget", feature },
+      servedFromCache: false,
+      pendingCapabilityApprovals: [],
+      failedPieces: [{ plan: "a video widget", reason: "tier1 failed after retry" }],
+    });
+    if (out.outcome === "created") expect(out.failedPieces).toHaveLength(1);
   });
 
   it("parses the declined arm", () => {
@@ -296,6 +308,37 @@ describe("sanitizeTree", () => {
       children: [el("script")],
     };
     expect(sanitizeTree(tree, "strict").violations.length).toBeGreaterThan(0);
+  });
+
+  it("sanitizes node trees inside component props (itemTemplate bypass)", () => {
+    const tree: UINode = {
+      kind: "component",
+      component: "List",
+      props: {
+        items: { $data: "rows" },
+        itemTemplate: {
+          kind: "element",
+          tag: "img",
+          attrs: { src: "/x.png", onerror: "alert(1)" },
+        },
+      },
+    };
+    // strict: reported as a violation
+    expect(sanitizeTree(tree, "strict").violations.join(" ")).toMatch(/onerror/);
+    // strip: removed from the returned tree
+    const { node } = sanitizeTree(tree, "strip");
+    expect(JSON.stringify(node)).not.toContain("onerror");
+  });
+
+  it("strips script tags hidden inside itemTemplate", () => {
+    const tree: UINode = {
+      kind: "component",
+      component: "List",
+      props: { itemTemplate: { kind: "element", tag: "script" } },
+    };
+    expect(sanitizeTree(tree, "strict").violations.length).toBeGreaterThan(0);
+    const { node } = sanitizeTree(tree, "strip");
+    expect(JSON.stringify(node)).not.toContain('"tag":"script"');
   });
 });
 

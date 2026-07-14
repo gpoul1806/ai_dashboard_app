@@ -149,16 +149,6 @@ export default function App() {
   // App-wide shared state: any widget writes via setGlobal/toggleGlobal
   // actions, any widget reads via {"$global"} bindings — cross-widget wiring.
   const [globals, setGlobals] = useState<Record<string, unknown>>({});
-  const appActions = useMemo(
-    () => ({
-      globals,
-      setView: setActiveView,
-      setGlobal: (key: string, value: unknown) =>
-        setGlobals((g) => ({ ...g, [key]: value })),
-      toggleGlobal: (key: string) => setGlobals((g) => ({ ...g, [key]: !g[key] })),
-    }),
-    [globals],
-  );
 
   useEffect(() => {
     const el = headerRef.current;
@@ -251,15 +241,20 @@ export default function App() {
       pending.forEach((p) => URL.revokeObjectURL(p.previewUrl));
       setPending([]);
       await refresh();
+      const failed = result.failedPieces ?? [];
+      const failNote =
+        failed.length > 0
+          ? ` ${failed.length} piece${failed.length === 1 ? "" : "s"} couldn't be built — try asking for ${failed.length === 1 ? "it" : "them"} separately.`
+          : "";
       if (result.pendingCapabilityApprovals.length > 0) {
         setStatus(
-          `Built "${feature.name}". New capabilities need approval in the dev panel: ${result.pendingCapabilityApprovals.join(", ")}`,
+          `Built "${feature.name}". New capabilities need approval in the dev panel: ${result.pendingCapabilityApprovals.join(", ")}${failNote}`,
         );
       } else {
         setStatus(
-          result.servedFromCache
+          (result.servedFromCache
             ? `Served "${feature.name}" instantly from cache.`
-            : `Built "${feature.name}".`,
+            : `Built "${feature.name}".`) + failNote,
         );
       }
     } catch (e) {
@@ -330,6 +325,19 @@ export default function App() {
       : views.includes("home")
         ? "home"
         : (views[0] ?? null);
+  // App actions handed to every widget. activeView carries the EFFECTIVE view
+  // so tab items can highlight via {"$if":"view:<name>"} even before a click.
+  const appActions = useMemo(
+    () => ({
+      globals,
+      activeView: effectiveView,
+      setView: setActiveView,
+      setGlobal: (key: string, value: unknown) =>
+        setGlobals((g) => ({ ...g, [key]: value })),
+      toggleGlobal: (key: string) => setGlobals((g) => ({ ...g, [key]: !g[key] })),
+    }),
+    [globals, effectiveView],
+  );
   const inView = (f: FeatureRecord) => {
     const v = viewOf(f);
     return !v || v === effectiveView;

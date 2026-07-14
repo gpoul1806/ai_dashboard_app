@@ -17,6 +17,7 @@ export const BUILTIN_COMPONENTS = [
   "Stack",
   "Text",
   "Input",
+  "Textarea",
   "Button",
   "List",
   "Checkbox",
@@ -95,7 +96,9 @@ export type UINode =
       /** camelCase inline CSS authored by the LLM; values may be $if bindings
        *  so visuals react to state (e.g. a sliding switch knob). */
       style?: Record<string, string | number | Binding>;
-      /** Action to run on click: "addRow" | "deleteRow" | "toggleRow:<field>" | "clearForm". */
+      /** Action(s) to run on click: "addRow" | "deleteRow" | "toggleRow:<f>" |
+       *  "clearForm" | "setView:<v>" | "toggleGlobal:<k>" | "setGlobal:<k>=<v>".
+       *  Chain steps with ";" — e.g. "addRow;setView:home". */
       action?: string;
       children?: UINode[];
     }
@@ -216,6 +219,9 @@ export const RequestOutcomeSchema = z.discriminatedUnion("outcome", [
     }),
     servedFromCache: z.boolean(),
     pendingCapabilityApprovals: z.array(z.string()),
+    /** Complex asks fan out to parallel worker agents; pieces that failed
+     *  after their own retry are reported here instead of failing the batch. */
+    failedPieces: z.array(z.object({ plan: z.string(), reason: z.string() })).default([]),
   }),
   z.object({
     outcome: z.literal("declined"),

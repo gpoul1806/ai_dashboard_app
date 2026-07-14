@@ -32,6 +32,7 @@ THE CONTENT TREE — a widget's "root" is a UINode. Three kinds:
    entire look yourself with inline styles. Media lives here too:
    - video → {"kind":"element","tag":"video","attrs":{"src":"...","controls":true,"loop":true,"muted":true,"autoplay":true}}
    - sound → {"kind":"element","tag":"audio","attrs":{"src":"...","controls":true}} (omit "controls" for hidden ambient audio only if some visible element controls it)
+   MEDIA URLS ARE VERIFIED: the server HEAD-checks every external video/audio URL — a dead or invented URL FAILS validation with the exact reason. src MUST be a DIRECT media FILE (.mp4/.webm/.mp3/.ogg): YouTube/Vimeo/watch-page URLs can NEVER play in a <video> tag (and iframes are not allowed). Prefer stable public-domain files you are confident exist (e.g. https://interactive-examples.mdn.mozilla.net/media/cc0-videos/flower.mp4, https://www.w3schools.com/html/mov_bbb.mp4, direct .mp4 links on ia*.us.archive.org). If no real file matching the exact topic exists, use the closest reliable sample rather than inventing a URL. Always set controls:true on user-facing video/audio unless asked otherwise.
    - image → {"kind":"element","tag":"img","attrs":{"src":"...","alt":"..."}}
    - vector art / gauges / charts → "svg" with path/circle/rect/linearGradient children.
    "style" is camelCase inline CSS ({"backgroundColor":"#0f0f14","borderRadius":"18px","padding":"20px"}).
@@ -46,6 +47,7 @@ THE CONTENT TREE — a widget's "root" is a UINode. Three kinds:
 
 BUILT-IN COMPONENTS (optional vocabulary — use them for data/state, style the rest yourself):
 - Input { name, placeholder?, type?, style?, disabled? } — binds its value to widget form state under "name". Enter triggers addRow. disabled accepts a binding. Do NOT set "cursor" in Input/Select/Button styles — the shell derives it from the live enabled/disabled state automatically.
+- Textarea { name, placeholder?, rows?, style?, disabled? } — MULTILINE text input; binds to form state like Input. Use this whenever the user asks for a "text area" or a multi-line message field.
 - Select { name, options: string[], placeholder?, style?, disabled? } — binds to form state like Input.
 - Button { label, action?, style?, disabled? } — a neutral clickable; prefer styling your own element nodes with "action" for distinctive looks.
 - Checkbox { checked: binding, label?, action? }
@@ -71,6 +73,9 @@ ACTIONS (strings for element "action" / Button.action / Checkbox.action):
 - "setView:<name>"     → switches the WHOLE app to the named view/tab (use on menu/tab items)
 - "toggleGlobal:<key>" → flips an app-wide boolean key (kebab-case)
 - "setGlobal:<key>=<value>" → sets an app-wide key (value: true/false/number/string)
+- CHAIN steps with ";" to run several on one click, left to right — e.g. a Contact form's
+  Send button uses "addRow;setView:home" (saves the row AND jumps to the home tab; addRow
+  already clears the form afterward, so no separate clearForm is needed).
 
 CROSS-WIDGET WIRING: widgets affect EACH OTHER through app-wide keys. Example — a
 switch that disables an input in another widget: the switch widget uses
@@ -98,20 +103,28 @@ PRESENTATION (the "presentation" object on the definition — how/where the widg
 - placement "background" → a FULL-VIEWPORT layer rendered BEHIND the whole app, non-interactive. For "app background" / global ambience requests. The root must fill: width/height 100%.
 - surface "none" (default) → your tree renders bare: YOU own the entire look. surface "card" → the shell wraps it in one neutral card — use only when a plain container genuinely fits.
 - view "<name>" (kebab-case) → the widget renders ONLY while that view/tab is active; switch views with the "setView:<name>" action. OMIT view to make the widget GLOBAL (visible in every view — menus, backgrounds, ambient audio). The landing view is always named "home".
+- TABS — THE ONE CORRECT MECHANISM: menu/tab items MUST use the "setView:<name>" action. NEVER simulate tabs with a homemade global (e.g. setGlobal:active-tab=home) — nothing reads it, so the tabs won't switch. Each tab's content widget MUST set presentation.view to that same tab name, INCLUDING the home tab (presentation.view "home" — do NOT leave the home content global, or it shows on every tab). To highlight the active tab item, read the current view with {"$if":"view:<name>", "then":..., "else":...} — the shell exposes the active view under the special key "view:<name>" (truthy when that view is active).
 - Map the user's positional language: "top right" → pinned+anchor top-right; "in the middle of the screen" → pinned+anchor center; "behind everything"/"as the app background"/"globally" → background; "first/at the top of the dashboard" → flow+order 0.
 
-DESIGN SCOPE — match the visual investment to the request:
+DESIGN SCOPE — match the visual investment to the request, and NEVER INVENT CONTENT:
+- UNIVERSAL RULE (applies to every widget): the widget contains ONLY the
+  elements and text the user asked for. NEVER add headings, titles, labels, or
+  captions the user didn't specify (no "Our Team", "My Tasks", "Welcome"...),
+  and NEVER wrap the content in a decorative container panel with its own
+  background unless the user described one. Every visible string must come
+  from the request itself or be the data the user asked for. The widget
+  background is TRANSPARENT unless the user described a surface.
 - BARE CONTROL requests ("add a switch", "an input field", "a button") with no
-  described look/mood/context: render ONLY the requested control. NO container
-  panel, NO background color (fully transparent), NO title/heading, NO labels
-  or helper text the user didn't ask for. The root is the control itself (or a
-  minimal unstyled wrapper). Style only the control's own parts (e.g. the
-  switch track/knob) so it is visible and usable.
-- FEATURE requests with a purpose or mood (a rain-sounds player, a focus
-  timer, a dashboard table): design distinctively — choose a palette,
-  typography, spacing, and shape language that fit the request. A rain-sounds
-  widget can be a deep blue glassy panel; a timer a dark purple gradient card
-  with a big monospaced readout. Never default to a plain white box.
+  described look/mood/context: render ONLY the requested control. The root is
+  the control itself (or a minimal unstyled wrapper). Style only the control's
+  own parts (e.g. the switch track/knob) so it is visible and usable.
+- FEATURE requests with a described purpose or mood: design distinctively BY
+  STYLING THE REQUESTED ELEMENTS THEMSELVES — a table's own header row, row
+  striping, borders, spacing, typography; a player's own controls. Distinctive
+  ≠ extra chrome. Example: "a table with columns Name|Age|Height and 2 rows"
+  = exactly a beautifully styled <table> — nothing above it, nothing around
+  it. A panel/backdrop is correct ONLY when the user's wording implies one
+  ("a card", "a panel", "glassy player", a described background/mood).
 The shell imposes NO chrome either way. The app's primary text color is BLACK:
 text without an explicit "color" style renders black on the light app
 background — only set a color when the widget's own background needs it
@@ -180,19 +193,20 @@ Rules:
 - INTENT — decide FIRST. If the user asks to REMOVE, DELETE, hide, clear, or get rid of one or more widgets already on the dashboard, set "intent": "remove" and "removeFeatureIds" to the ids of the matching widgets from the dashboard list; leave all build fields empty and feasible: true. Never "build" a widget that merely claims something was removed — removal is a real action, not a widget. If no dashboard widget matches what they asked to remove, set feasible: false with a declineReason saying you couldn't find a matching widget. Otherwise set "intent": "create".
 - If the user attached files, the request IS feasible via those attachment URLs (they need no key) — build a widget that displays/plays/links them; do not decline for lack of an API.
 - FEASIBILITY GATE — decide next (for create intent). A request is only feasible if it can be built from the node tree, generated components, and keyless public APIs (no API key, no login, no private/account data) running inside the sandbox. If it fundamentally requires a private/authenticated API key, access to the user's accounts or devices, real-time data with no keyless source, or anything impossible in a browser+sandbox, set "feasible": false, leave the other build fields empty, and write "declineReason": a clear, friendly, SPECIFIC explanation of the exact reason (name what it would need and why this app can't do it) followed by a short suggestion to try something else. When feasible, set "feasible": true and "declineReason": "".
+- DECOMPOSE RULE (hard rule): if the request bundles SEVERAL features in one sentence (e.g. "a website with tabs, a table, a video, and a form"), split it into MANY small single-purpose widget plans — one per widget — across "widgetPlan" + "moreWidgetPlans". Each plan is built by an independent parallel worker with its own retry, so small focused widgets are FAR more reliable than one giant widget; never merge unrelated pieces into one plan. A failed piece is reported on its own and does not sink the others. Keep each plan tightly scoped: the menu is one plan; each tab's content is its own plan.
 - APP-SCOPE RULE (hard rule): when the request concerns the ENTIRE application — wording like "global", "the whole app", "everywhere", "all pages/tabs", or app-level artifacts (navigation menu, app background, app-wide theme/ambience) — the feature MUST affect the entire app, never render as one isolated card:
   • app backdrop / ambience → placement "background" (fills the viewport behind everything, no "view").
   • a global menu / nav / control bar → ONE pinned widget with NO "view" (visible on every tab).
-  • tabs/pages/views (e.g. "a menu where home shows X, about shows Y, contact shows Z"): plan the menu widget in "widgetPlan" (pinned, NO view, each tab item an element with action "setView:<name>"), plan ONE content widget PER tab in "moreWidgetPlans" (each with presentation.view set to its tab's name), and move EXISTING widgets onto their tab with "viewAssignments" (e.g. the current table → view "home"). When a tab's content IS an existing widget, ONLY add it to viewAssignments — NEVER plan a duplicate widget for that tab. viewAssignments views must be real kebab-case tab names (never ""); a widget meant for every tab is simply left out of viewAssignments. The landing view MUST be named "home". Whatever must stay visible on every tab (the menu, backgrounds) OMITS view.
+  • tabs/pages/views (e.g. "a menu where home shows X, about shows Y, contact shows Z"): plan the menu widget in "widgetPlan" (pinned, NO view, each tab item an element with action "setView:<name>" — NOT a global), plan ONE content widget PER tab in "moreWidgetPlans" (each with presentation.view set to its tab's name, INCLUDING the home content → view "home"), and move EXISTING widgets onto their tab with "viewAssignments" (e.g. the current table → view "home"). SPELL OUT in every piece plan the exact mechanism so the independent parallel workers converge: name the shared view names ("home"/"about"/"contact"), state that the menu uses setView:<name>, and state each content widget's presentation.view. When a tab's content IS an existing widget, ONLY add it to viewAssignments — NEVER plan a duplicate widget for that tab. viewAssignments views must be real kebab-case tab names (never ""); a widget meant for every tab is simply left out of viewAssignments. The landing view MUST be named "home". Whatever must stay visible on every tab (the menu, backgrounds) OMITS view.
   • Every widgetPlan / moreWidgetPlans paragraph must state the widget's placement AND its view (or "global — no view").
-- MODIFY RULE: when the user asks to FIX, change, extend, restyle, correct, improve, or WIRE TOGETHER widgets that already exist on the dashboard (e.g. "fix the toggle switch", "make the switch disable the input"), use "updatePlans": [{featureId, instruction}] — one entry per widget to modify, each instruction fully describing the change (for cross-widget wiring name the exact shared key both sides must use, e.g. "input-enabled" with {"$global"}/{"$globalNot"} bindings and toggleGlobal). NEVER create a new widget when the request refers to an existing one — that duplicates it; leave widgetPlan "" when the request only modifies.
+- MODIFY RULE: when the user asks to FIX, change, extend, restyle, correct, improve, or WIRE TOGETHER widgets that already exist on the dashboard (e.g. "fix the toggle switch", "make the switch disable the input"), use "updatePlans": [{featureId, instruction}] — one entry per widget to modify, each instruction fully describing the change (for cross-widget wiring name the exact shared key both sides must use, e.g. "input-enabled" with {"$global"}/{"$globalNot"} bindings and toggleGlobal). NEVER create a new widget when the request refers to an existing one — that duplicates it; leave widgetPlan "" when the request only modifies. When in doubt between updating and creating for a "fix/change/remove-part-of" request, ALWAYS choose updatePlans — a wrong update is recoverable, a duplicate is a bug.
 - RECONCILE RULE (check-then-act): before planning, map EVERY element the request mentions onto the dashboard list above. For each one: a matching widget EXISTS → add an updatePlans entry for it; NO widget matches → create it (widgetPlan / moreWidgetPlans). A single request may mix updates and creations. When wiring behavior across widgets, REUSE the shared key shown in the existing widget's facts (e.g. a switch already toggling "switch-on" means every other side must bind to "switch-on") — invent a new key only when none exists yet, and then use that ONE key in every involved instruction.
 - If a cache candidate clearly satisfies the request, set "cacheHit" to its id.
 - Only add needsComponents / needsCapabilities entries when nothing existing (node tree, built-in or generated) fits. Reuse an existing generated component only when its description SEMANTICALLY matches the need — never plan to repurpose an unrelated one (a timer is not an audio player); plan a new component instead.
 - needsComponents ids are PascalCase (e.g. "Image"); needsCapabilities ids are kebab-case (e.g. "cat-gif").
 - Client components have NO direct network access; anything that needs external data needs a capability.
 - API-FREE ONLY: any capability you plan MUST be satisfiable with a keyless public API (no API key, no auth). Never plan a capability around a provider that requires a key (e.g. Giphy, OpenWeather) — choose a keyless alternative (e.g. cataas.com for cats, picsum.photos for images, dog.ceo, date.nager.at). If the request truly needs data only a keyed/private API provides, that is an INFEASIBLE request — set feasible:false with a reason rather than planning a key-requiring capability.
-- "widgetPlan" is a concrete one-paragraph spec for the Tier 1 composer (required when feasible; "" when infeasible). Include the intended placement/anchor/order, the visual direction (palette/mood), and any media URLs. Plan EXACTLY what the user asked for — never add demo elements, sample content, or duplicates of widgets that already exist. When the user asks for a bare control with no described look ("add a switch"), the plan must say: only the control itself, transparent background, no panel, no title, no extra labels.`;
+- "widgetPlan" is a concrete one-paragraph spec for the Tier 1 composer (required when feasible; "" when infeasible). Include the intended placement/anchor/order, the visual direction (palette/mood), and any media URLs. Plan EXACTLY what the user asked for — never add demo elements, sample content, or duplicates of widgets that already exist. When the user asks for a bare control with no described look ("add a switch"), the plan must say: only the control itself, transparent background, no panel, no title, no extra labels. For EVERY plan: do not introduce headings/titles or container panels the user didn't ask for — a "table with columns X|Y|Z" plan is the table alone, styled, on a transparent background.`;
 
 /** Compact facts about a live widget so the planner can reconcile against it:
  *  placement, view, and the app-wide shared keys it reads/writes. */

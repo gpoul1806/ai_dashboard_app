@@ -58,6 +58,8 @@ export const RegistryContext = createContext<RegistryLike | null>(null);
  *  Provided by App, consumed by WidgetHost. */
 export interface AppActions {
   globals: Record<string, unknown>;
+  /** The active view/tab, so widgets can read {"$if":"view:<name>"}. */
+  activeView: string | null;
   setView(view: string): void;
   setGlobal(key: string, value: unknown): void;
   toggleGlobal(key: string): void;

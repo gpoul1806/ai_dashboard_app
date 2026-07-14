@@ -70,18 +70,32 @@ describe("validateWidgetDefinition — free-form trees", () => {
     );
     expect(result.ok).toBe(false);
   });
+
+  it("accepts a chained action and rejects a chain with an invalid step", () => {
+    const good = validateWidgetDefinition(
+      def({ kind: "element", tag: "div", action: "addRow;setView:home" }),
+      NO_GENERATED,
+    );
+    expect(good.ok).toBe(true);
+
+    const bad = validateWidgetDefinition(
+      def({ kind: "element", tag: "div", action: "addRow;dropTables" }),
+      NO_GENERATED,
+    );
+    expect(bad.ok).toBe(false);
+  });
 });
 
 describe("validateTier1Wire — definitionJson transport", () => {
-  it("still fails (with readable retry errors) when the JSON is garbage", () => {
+  it("still fails (with readable retry errors) when the JSON is garbage", async () => {
     // jsonrepair may coerce fragments into *some* JSON, but the result then
     // fails Zod validation — either way the errors ride the retry loop.
-    const result = validateTier1Wire({ definitionJson: "{ nope" }, NO_GENERATED);
+    const result = await validateTier1Wire({ definitionJson: "{ nope" }, NO_GENERATED);
     expect(result.ok).toBe(false);
     if (!result.ok) expect(result.errors.length).toBeGreaterThan(0);
   });
 
-  it("repairs recoverable escaping slips instead of burning the retry", () => {
+  it("repairs recoverable escaping slips instead of burning the retry", async () => {
     const good = {
       id: "w",
       name: "W",
@@ -91,12 +105,12 @@ describe("validateTier1Wire — definitionJson transport", () => {
     };
     // A trailing comma — invalid JSON.parse, trivially repairable.
     const broken = JSON.stringify(good).slice(0, -1) + ",}";
-    const result = validateTier1Wire({ definitionJson: broken }, NO_GENERATED);
+    const result = await validateTier1Wire({ definitionJson: broken }, NO_GENERATED);
     expect(result.ok).toBe(true);
   });
 
-  it("parses and validates a definition riding as a JSON string", () => {
-    const result = validateTier1Wire(
+  it("parses and validates a definition riding as a JSON string", async () => {
+    const result = await validateTier1Wire(
       {
         definitionJson: JSON.stringify({
           id: "w",
@@ -111,6 +125,54 @@ describe("validateTier1Wire — definitionJson transport", () => {
     );
     expect(result.ok).toBe(true);
     if (result.ok) expect(result.value.presentation.anchor).toBe("bottom-right");
+  });
+
+  it("blocks SSRF targets: private/internal hosts in media URLs never get probed", async () => {
+    delete process.env.SKIP_MEDIA_URL_CHECK;
+    for (const src of [
+      "http://169.254.169.254/latest/meta-data/",
+      "http://127.0.0.1:3001/api/features",
+      "http://10.0.0.5/x.mp4",
+      "http://localhost:5432/x.mp4",
+      "http://[::1]/x.mp4",
+    ]) {
+      const result = await validateTier1Wire(
+        {
+          definitionJson: JSON.stringify({
+            id: "v",
+            name: "V",
+            description: "v",
+            version: 1,
+            root: { kind: "element", tag: "video", attrs: { src, controls: true } },
+          }),
+        },
+        NO_GENERATED,
+      );
+      expect(result.ok).toBe(false);
+      if (!result.ok) expect(result.errors.join(" ")).toMatch(/not allowed/);
+    }
+  });
+
+  it("rejects YouTube/watch-page URLs in <video> src (cannot play in a video tag)", async () => {
+    delete process.env.SKIP_MEDIA_URL_CHECK;
+    const result = await validateTier1Wire(
+      {
+        definitionJson: JSON.stringify({
+          id: "v",
+          name: "V",
+          description: "v",
+          version: 1,
+          root: {
+            kind: "element",
+            tag: "video",
+            attrs: { src: "https://www.youtube.com/watch?v=abc123", controls: true },
+          },
+        }),
+      },
+      NO_GENERATED,
+    );
+    expect(result.ok).toBe(false);
+    if (!result.ok) expect(result.errors.join(" ")).toMatch(/YouTube/);
   });
 });
 

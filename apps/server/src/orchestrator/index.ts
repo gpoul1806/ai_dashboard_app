@@ -46,6 +46,9 @@ export type OrchestratorResult =
       cached: boolean;
       /** Capability keys generated this run that still need dev approval. */
       pendingApprovals: string[];
+      /** Pieces of a decomposed request that failed after their own retry —
+       *  partial success instead of failing the whole batch. */
+      failedPieces: Array<{ plan: string; reason: string }>;
     }
   | {
       status: "removed";
@@ -134,6 +137,35 @@ async function generateValidated<W, T>(
   throw new Error(`${step} failed after retry: ${lastErrors.join("; ")}`);
 }
 
+/** Worker pool: runs fn over items with at most `limit` in flight — the
+ *  "agent team" primitive. Never rejects; each piece settles independently. */
+async function mapLimit<T, R>(
+  items: T[],
+  limit: number,
+  fn: (item: T, index: number) => Promise<R>,
+): Promise<Array<PromiseSettledResult<R>>> {
+  const results: Array<PromiseSettledResult<R>> = new Array(items.length);
+  let next = 0;
+  const workers = Array.from({ length: Math.max(1, Math.min(limit, items.length)) }, async () => {
+    while (next < items.length) {
+      const i = next++;
+      try {
+        results[i] = { status: "fulfilled", value: await fn(items[i], i) };
+      } catch (err) {
+        results[i] = { status: "rejected", reason: err };
+      }
+    }
+  });
+  await Promise.all(workers);
+  return results;
+}
+
+/** How many worker agents build pieces concurrently. Read at call time so
+ *  tests can pin it to 1 (deterministic FIFO mocks). */
+function workerConcurrency(): number {
+  return Math.max(1, Number(process.env.GENERATION_CONCURRENCY ?? 3) || 1);
+}
+
 function slugify(text: string): string {
   return (
     text
@@ -194,7 +226,7 @@ export class Orchestrator {
         // layout) — re-surface the cached widget.
         await this.db.addToLayout(best.feature.id);
         await this.log(requestText, "cache", true, true, 0, 0);
-        return { status: "ok", feature: best.feature, cached: true, pendingApprovals: [] };
+        return { status: "ok", feature: best.feature, cached: true, pendingApprovals: [], failedPieces: [] };
       }
     }
     const candidates = useCache ? await this.db.findSimilarFeatures(requestText, 5) : [];
@@ -252,7 +284,7 @@ export class Orchestrator {
       if (cached) {
         await this.db.addToLayout(cached.id);
         await this.log(requestText, "cache", true, true, 0, 0);
-        return { status: "ok", feature: cached, cached: true, pendingApprovals: [] };
+        return { status: "ok", feature: cached, cached: true, pendingApprovals: [], failedPieces: [] };
       }
     }
 
@@ -262,25 +294,57 @@ export class Orchestrator {
     try {
       const pendingApprovals = await this.runTier3(requestText, plan, signal);
       await this.runTier2(requestText, plan, attachments, images, signal);
+      // Fan out: every piece (new widget or in-place update) is built by an
+      // independent worker agent with its own retry. One failing piece never
+      // kills the batch — it lands in failedPieces instead.
+      const limit = workerConcurrency();
+      const buildPlans = [plan.widgetPlan, ...plan.moreWidgetPlans].filter((p) => p.trim());
+      const failedPieces: Array<{ plan: string; reason: string }> = [];
+
+      const built = await mapLimit(buildPlans, limit, (p) =>
+        this.runTier1(requestText, p, attachments, signal),
+      );
+      if (signal?.aborted) throw new Error("Request was aborted");
       const features: FeatureRow[] = [];
-      for (const widgetPlan of [plan.widgetPlan, ...plan.moreWidgetPlans]) {
-        if (!widgetPlan.trim()) continue;
-        features.push(await this.runTier1(requestText, widgetPlan, attachments, signal));
-      }
+      built.forEach((r, i) => {
+        if (r.status === "fulfilled") features.push(r.value);
+        else failedPieces.push({ plan: buildPlans[i], reason: String((r.reason as Error)?.message ?? r.reason) });
+      });
+
       // Modify existing widgets in place (cross-widget wiring, restyles…).
-      const updated = await this.runUpdates(requestText, plan, signal);
+      const updatedResults = await mapLimit(plan.updatePlans, limit, (u) =>
+        this.runUpdate(requestText, u.featureId, u.instruction, signal),
+      );
+      if (signal?.aborted) throw new Error("Request was aborted");
+      const updated: FeatureRow[] = [];
+      updatedResults.forEach((r, i) => {
+        if (r.status === "fulfilled") {
+          if (r.value) updated.push(r.value);
+        } else {
+          failedPieces.push({
+            plan: plan.updatePlans[i].instruction,
+            reason: String((r.reason as Error)?.message ?? r.reason),
+          });
+        }
+      });
+
       // Re-home existing widgets onto views (e.g. the current table → "home"
       // when a tab menu is created). Applied only after the builds succeeded
       // so a failed pipeline can't strand widgets on invisible views.
       await this.applyViewAssignments(plan);
+
       const primary = features[0] ?? updated[0];
       if (!primary) {
+        if (failedPieces.length > 0) {
+          const technical = failedPieces.map((f) => f.reason).join("; ");
+          return { status: "declined", reason: await explainFailure(requestText, technical) };
+        }
         return {
           status: "declined",
           reason: "The request didn't produce or change any widget — try rephrasing it.",
         };
       }
-      return { status: "ok", feature: primary, cached: false, pendingApprovals };
+      return { status: "ok", feature: primary, cached: false, pendingApprovals, failedPieces };
     } catch (err) {
       if (signal?.aborted) throw err; // client cancelled — let the route drop it
       const technical = err instanceof Error ? err.message : String(err);
@@ -395,39 +459,35 @@ export class Orchestrator {
     }
   }
 
-  /** Regenerates existing widgets in place per plan.updatePlans (same id). */
-  private async runUpdates(
+  /** Regenerates ONE existing widget in place (same id) — a worker-agent piece. */
+  private async runUpdate(
     requestText: string,
-    plan: Plan,
+    featureId: string,
+    instruction: string,
     signal?: AbortSignal,
-  ): Promise<FeatureRow[]> {
-    const updated: FeatureRow[] = [];
-    if (plan.updatePlans.length === 0) return updated;
+  ): Promise<FeatureRow | null> {
+    const existing = await this.db.getFeature(featureId);
+    if (!existing) return null;
     const components = await this.db.listComponents();
     const capabilities = await this.db.listCapabilities();
     const componentKeys = new Set(components.map((c) => c.key));
 
-    for (const { featureId, instruction } of plan.updatePlans) {
-      const existing = await this.db.getFeature(featureId);
-      if (!existing) continue;
-      const def = await generateValidated(
-        "tier1",
-        tier1System(components, capabilities),
-        `User request: ${requestText}\n\nUPDATE an existing widget. Its CURRENT definition:\n${JSON.stringify(existing.definition)}\n\nApply exactly this change: ${instruction}\n\nReturn the FULL updated WidgetDefinition — keep the same "id" and "name", keep everything not affected by the change identical, and bump nothing else.`,
-        Tier1WireSchema,
-        (wire) => validateTier1Wire(wire, componentKeys),
-        (tokens, retries, success) =>
-          void this.log(requestText, "tier1", false, success, retries, tokens),
-        [],
-        signal,
-      );
-      def.id = existing.id;
-      def.version = existing.version + 1;
-      await this.db.updateFeatureDefinition(existing.id, def);
-      await this.db.addToLayout(existing.id);
-      updated.push({ ...existing, definition: def });
-    }
-    return updated;
+    const def = await generateValidated(
+      "tier1",
+      tier1System(components, capabilities),
+      `User request: ${requestText}\n\nUPDATE an existing widget. Its CURRENT definition:\n${JSON.stringify(existing.definition)}\n\nApply exactly this change: ${instruction}\n\nReturn the FULL updated WidgetDefinition — keep the same "id" and "name", keep everything not affected by the change identical, and bump nothing else.`,
+      Tier1WireSchema,
+      (wire) => validateTier1Wire(wire, componentKeys),
+      (tokens, retries, success) =>
+        void this.log(requestText, "tier1", false, success, retries, tokens),
+      [],
+      signal,
+    );
+    def.id = existing.id;
+    def.version = existing.version + 1;
+    await this.db.updateFeatureDefinition(existing.id, def);
+    await this.db.addToLayout(existing.id);
+    return { ...existing, definition: def };
   }
 
   private async runTier1(

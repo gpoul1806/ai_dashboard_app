@@ -58,7 +58,10 @@ export function WidgetHost({ feature }: { feature: FeatureRecord }) {
   }, []);
 
   const runAction = useCallback(
-    async (action: string, scope: Scope) => {
+    async (fullAction: string, scope: Scope) => {
+      // Actions may chain steps with ";" (e.g. "addRow;setView:home") — run
+      // them sequentially so later steps see the effects of earlier ones.
+      for (const action of fullAction.split(";").map((s) => s.trim()).filter(Boolean)) {
       try {
         if (action.startsWith("setView:")) {
           // App-level: switches the active view/tab for the whole dashboard.
@@ -118,11 +121,17 @@ export function WidgetHost({ feature }: { feature: FeatureRecord }) {
       } catch (err) {
         console.error(`widget action "${action}" failed`, err);
       }
+      }
     },
     [def.dataSchema, feature.id, form, appActions],
   );
 
-  const globals = appActions?.globals ?? {};
+  // Widget-visible state = app globals + a derived "view:<active>" flag so
+  // tab items can highlight themselves with {"$if":"view:<name>"}.
+  const globals = useMemo(() => {
+    const base = appActions?.globals ?? {};
+    return appActions?.activeView ? { ...base, [`view:${appActions.activeView}`]: true } : base;
+  }, [appActions?.globals, appActions?.activeView]);
   const ctx: WidgetCtxValue = useMemo(
     () => ({ definition: def, rows, form, globals, setFormField, runAction }),
     [def, rows, form, globals, setFormField, runAction],

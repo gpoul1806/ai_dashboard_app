@@ -80,8 +80,14 @@ export function validatePlan(raw: unknown): Validated<Plan> {
 /* Tier 1 — WidgetDefinition                                           */
 /* ------------------------------------------------------------------ */
 
-const ACTION_RE =
+const ACTION_STEP_RE =
   /^(addRow|deleteRow|clearForm|toggleRow:.+|setView:[a-z0-9-]+|toggleGlobal:[a-z0-9-]+|setGlobal:[a-z0-9-]+=.*)$/;
+
+/** Actions may chain steps with ";" — every step must be valid. */
+function isValidAction(action: string): boolean {
+  const steps = action.split(";").map((s) => s.trim()).filter(Boolean);
+  return steps.length > 0 && steps.every((s) => ACTION_STEP_RE.test(s));
+}
 
 /** Walks a UINode tree collecting component names, action strings, and
  *  itemTemplate subtrees (a UINode carried in component props). */
@@ -119,9 +125,9 @@ export function validateWidgetDefinition(
       errors.push(
         `root: component "${n.component}" is neither a built-in nor an existing generated component key`,
       );
-    } else if (n.kind === "element" && n.action && !ACTION_RE.test(n.action)) {
+    } else if (n.kind === "element" && n.action && !isValidAction(n.action)) {
       errors.push(
-        `root: element action "${n.action}" is invalid (addRow | deleteRow | clearForm | toggleRow:<field> | setView:<view>)`,
+        `root: element action "${n.action}" is invalid (steps: addRow | deleteRow | clearForm | toggleRow:<field> | setView:<view> | toggleGlobal:<key> | setGlobal:<key>=<value>, chained with ";")`,
       );
     }
   });
@@ -138,11 +144,162 @@ export function validateWidgetDefinition(
   return { ok: true, value: def };
 }
 
+/* ------------------------------------------------------------------ */
+/* Media URL verification                                              */
+/* ------------------------------------------------------------------ */
+
+import { lookup } from "node:dns/promises";
+import { isIP } from "node:net";
+
+const MEDIA_TAGS = new Set(["video", "audio", "source"]);
+
+/** Private/reserved address check — the LLM authors media URLs, so the
+ *  verifier must never be usable as an SSRF probe into internal networks. */
+function isPrivateAddress(addr: string): boolean {
+  const v = addr.toLowerCase();
+  if (isIP(v) === 6 || v.includes(":")) {
+    // IPv4-mapped IPv6 → check the embedded IPv4.
+    const mapped = v.match(/^::ffff:(\d+\.\d+\.\d+\.\d+)$/);
+    if (mapped) return isPrivateAddress(mapped[1]);
+    return (
+      v === "::" ||
+      v === "::1" ||
+      v.startsWith("fc") ||
+      v.startsWith("fd") || // fc00::/7 unique-local
+      v.startsWith("fe8") ||
+      v.startsWith("fe9") ||
+      v.startsWith("fea") ||
+      v.startsWith("feb") // fe80::/10 link-local
+    );
+  }
+  const octets = v.split(".").map(Number);
+  if (octets.length !== 4 || octets.some((o) => Number.isNaN(o))) return true; // unparseable → treat as unsafe
+  const [a, b] = octets;
+  return (
+    a === 0 ||
+    a === 10 ||
+    a === 127 ||
+    (a === 100 && b >= 64 && b <= 127) || // CGNAT 100.64/10
+    (a === 169 && b === 254) || // link-local / cloud metadata
+    (a === 172 && b >= 16 && b <= 31) ||
+    (a === 192 && b === 168) ||
+    (a === 192 && b === 0) ||
+    (a === 198 && (b === 18 || b === 19)) ||
+    a >= 224 // multicast + reserved
+  );
+}
+
+/** True only for http(s) URLs whose host resolves exclusively to public IPs.
+ *  (dns.lookup pre-check + manual-redirect fetches — POC-level SSRF guard.) */
+async function isSafePublicUrl(raw: string): Promise<boolean> {
+  let url: URL;
+  try {
+    url = new URL(raw);
+  } catch {
+    return false;
+  }
+  if (url.protocol !== "http:" && url.protocol !== "https:") return false;
+  const host = url.hostname.replace(/^\[|\]$/g, "");
+  if (isIP(host)) return !isPrivateAddress(host);
+  try {
+    const addrs = await lookup(host, { all: true });
+    return addrs.length > 0 && addrs.every((a) => !isPrivateAddress(a.address));
+  } catch {
+    return false;
+  }
+}
+
+/** Collects external video/audio URLs (src + poster) from a tree. */
+function collectMediaUrls(root: UINode): string[] {
+  const urls: string[] = [];
+  walkNodes(root, (n) => {
+    if (n.kind !== "element" || !MEDIA_TAGS.has(n.tag.toLowerCase())) return;
+    for (const key of ["src", "poster"]) {
+      const v = n.attrs?.[key];
+      if (typeof v === "string" && /^https?:\/\//i.test(v)) urls.push(v);
+    }
+  });
+  return [...new Set(urls)];
+}
+
+/**
+ * Models invent media URLs that don't exist (or reference YouTube/Vimeo page
+ * URLs that can never play in a <video> tag) — the widget then renders a dead
+ * player. Verify each external video/audio URL actually resolves to media;
+ * failures feed the LLM retry with the exact reason.
+ */
+async function verifyMediaUrls(root: UINode): Promise<string[]> {
+  if (process.env.SKIP_MEDIA_URL_CHECK) return [];
+  const errors: string[] = [];
+  await Promise.all(
+    collectMediaUrls(root).map(async (url) => {
+      if (/youtube\.com|youtu\.be|vimeo\.com/i.test(url)) {
+        errors.push(
+          `media URL "${url}": YouTube/Vimeo page URLs cannot play inside a <video> tag — use a DIRECT media file URL (.mp4/.webm/.mp3)`,
+        );
+        return;
+      }
+      if (!(await isSafePublicUrl(url))) {
+        errors.push(
+          `media URL "${url}" is not allowed — media must live on a public http(s) host`,
+        );
+        return;
+      }
+      try {
+        const controller = new AbortController();
+        const timer = setTimeout(() => controller.abort(), 5000);
+        // redirect "manual": a public URL 302-ing to an internal address would
+        // bypass the host check — require direct links to the final file.
+        let res = await fetch(url, {
+          method: "HEAD",
+          redirect: "manual",
+          signal: controller.signal,
+        });
+        if (res.status === 405 || res.status === 501) {
+          // Some hosts reject HEAD — probe with a 1-byte range GET instead.
+          res = await fetch(url, {
+            method: "GET",
+            headers: { Range: "bytes=0-0" },
+            redirect: "manual",
+            signal: controller.signal,
+          });
+        }
+        clearTimeout(timer);
+        if (res.status >= 300 && res.status < 400) {
+          errors.push(
+            `media URL "${url}" redirects — link the FINAL media file URL directly`,
+          );
+          return;
+        }
+        if (!res.ok) {
+          // Coarse message on purpose: never echo upstream status codes (an
+          // LLM-authored URL must not turn this into a scanning oracle).
+          errors.push(
+            `media URL "${url}" is not reachable — use a real, directly playable public media file URL`,
+          );
+          return;
+        }
+        const type = (res.headers.get("content-type") ?? "").toLowerCase();
+        if (type && !/^(video|audio|image|application\/octet-stream)/.test(type)) {
+          errors.push(
+            `media URL "${url}" does not serve a media file — link the media FILE itself, not a web page`,
+          );
+        }
+      } catch {
+        errors.push(
+          `media URL "${url}" could not be verified — use a reliable public media file URL`,
+        );
+      }
+    }),
+  );
+  return errors;
+}
+
 /** Tier-1 wire adapter: definitionJson (string) → parsed + validated definition. */
-export function validateTier1Wire(
+export async function validateTier1Wire(
   wire: Tier1Wire,
   generatedComponentKeys: Set<string>,
-): Validated<WidgetDefinition> {
+): Promise<Validated<WidgetDefinition>> {
   let raw: unknown;
   try {
     raw = JSON.parse(wire.definitionJson);
@@ -160,7 +317,11 @@ export function validateTier1Wire(
       };
     }
   }
-  return validateWidgetDefinition(raw, generatedComponentKeys);
+  const result = validateWidgetDefinition(raw, generatedComponentKeys);
+  if (!result.ok) return result;
+  const mediaErrors = await verifyMediaUrls(result.value.root);
+  if (mediaErrors.length > 0) return { ok: false, errors: mediaErrors };
+  return result;
 }
 
 /* ------------------------------------------------------------------ */

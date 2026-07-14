@@ -122,13 +122,32 @@ export interface SanitizeResult {
 export function sanitizeTree(root: UINode, mode: "strict" | "strip"): SanitizeResult {
   const violations: string[] = [];
 
+  /** UINode-shaped prop values (itemTemplate & friends) must be walked too —
+   *  they are rendered as node trees and would otherwise bypass sanitation. */
+  function isNodeLike(v: unknown): v is UINode {
+    return (
+      typeof v === "object" &&
+      v !== null &&
+      !Array.isArray(v) &&
+      ["text", "element", "component"].includes((v as { kind?: unknown }).kind as string)
+    );
+  }
+
   function walk(node: UINode, path: string): UINode {
     if (node.kind !== "element") {
-      if (node.kind === "component" || node.kind === "text") {
-        if (node.kind === "component" && node.children) {
-          return { ...node, children: node.children.map((c, i) => walk(c, `${path}.children[${i}]`)) };
+      if (node.kind === "component") {
+        let props = node.props;
+        if (props) {
+          props = { ...props };
+          for (const [key, value] of Object.entries(props)) {
+            if (isNodeLike(value)) props[key] = walk(value, `${path}.props.${key}`);
+          }
         }
-        return node;
+        return {
+          ...node,
+          props,
+          children: node.children?.map((c, i) => walk(c, `${path}.children[${i}]`)),
+        };
       }
       return node;
     }

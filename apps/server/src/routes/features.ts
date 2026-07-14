@@ -74,6 +74,7 @@ export function featuresRouter(db: Db, orchestrator: Orchestrator): Router {
             artifact: { kind: "widget", feature: toApi(result.feature) },
             servedFromCache: result.cached,
             pendingCapabilityApprovals: result.pendingApprovals,
+            failedPieces: result.failedPieces ?? [],
           };
         }
         res.json(outcome);
