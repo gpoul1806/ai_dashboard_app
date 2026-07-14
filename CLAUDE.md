@@ -29,7 +29,7 @@ User request
 
 ## Stack
 
-- **Frontend:** React 18 + Vite + TypeScript. Thin shell: renderer engine + dynamic component loader. Plain CSS.
+- **Frontend:** React 18 + Vite + TypeScript. Thin shell: renderer engine + dynamic component loader. Plain CSS. Request bar is a 2-row textarea with **attachments** (images/screenshots/audio/files via picker, paste, or drag — images go to the LLM as vision input; files stored via Supabase storage) and **cancel** for in-flight requests (AbortController wired end-to-end; client close aborts the server-side generation).
 - **Backend:** Node.js + Express + TypeScript. LLM orchestrator with a planner step.
 - **Sandbox for generated server code:** `isolated-vm` (preferred) or worker threads with a strict capability API. Generated code NEVER runs in the main process.
 - **Database:** Supabase (Postgres) — features, generated components, generated capabilities, widget data, logs.
@@ -94,10 +94,21 @@ type UINode =
   | { kind: "text"; value: string | number | Binding }
   | { kind: "element"; tag: string;           // ANY allowlisted HTML/SVG tag (video, audio, img, svg…)
       attrs?: Record<string, ...|Binding>;    // src, controls, autoplay, loop, muted, poster…
-      style?: Record<string, string|number>;  // LLM-authored camelCase inline CSS
+      style?: Record<string, string|number|Binding>; // LLM-authored camelCase inline CSS
       action?: string; children?: UINode[] }
   | { kind: "component"; component: string; props?; children? }; // built-in or "Image@1"
 ```
+
+**Bindings** (usable in text values, element attrs, style values, and component props):
+`$data`/`$row`/`$form` (widget data + form values), `$count`/`$countWhere`/`$percentWhere`
+(aggregates), `$global`/`$globalNot` (app-wide shared state → cross-widget wiring), and
+`{$if: key, then, else}` — conditional literal keyed on a global ("!" prefix negates);
+THE way to map state onto visuals (knob position, colors, labels). The shell exposes the
+active view as the special truthy key `view:<name>` for active-tab highlighting.
+
+**Actions** (on any element): `addRow`/`removeRow`/`toggleField` etc. for widget data,
+`setView:<name>` (app-wide tab switch), `setGlobal:<key>=<value>` (shared state), and
+`;`-separated chains — e.g. `"addRow;setView:home"` saves AND navigates.
 
 - Element trees are sanitized on BOTH sides (`@myday/schema/sanitize`): strict at server
   validation (violations feed the LLM retry), strip at every client render, + a CSP backstop.
@@ -125,7 +136,7 @@ type UINode =
   - Single default-exported function component. React only — imports limited to `react` (mapped to the shell's copy via import map).
   - No direct `fetch` to the outside world — network only through the injected `useCapability(id)` hook, which routes to `/api/dyn/*`.
   - No access to cookies, localStorage, or globals beyond what the shell injects.
-- Built-in seed primitives (`Card`, `Stack`, `Text`, `Input`, `Button`, `List`, `Checkbox`, `Select`, `Counter`, `ProgressBar`, `Overlay`) exist so Tier 1 has a day-one vocabulary — but the registry is OPEN: Tier 2 grows it without redeploying the client.
+- Built-in seed primitives (`Card`, `Stack`, `Text`, `Input`, `Textarea`, `Button`, `List`, `Checkbox`, `Select`, `Counter`, `ProgressBar`, `Overlay`) exist so Tier 1 has a day-one vocabulary — but the registry is OPEN: Tier 2 grows it without redeploying the client.
 
 ### Tier 3 — Generated server capabilities
 
@@ -139,8 +150,11 @@ type UINode =
 
 ## Orchestrator (the brain)
 
-- Planner prompt receives: user request + current component registry index + current capability index + cache candidates.
-- It outputs a plan: `{ cacheHit? , needsCapabilities[], needsComponents[], widgetSpec }`.
+- Planner prompt receives: user request + current component registry index + current capability index + cache candidates + a live dashboard INVENTORY (existing widgets with placement/view/keys).
+- It outputs a plan: `{ cacheHit? , needsCapabilities[], needsComponents[], widgetPlan, moreWidgetPlans[], viewAssignments }`.
+- **Parallel worker agents (Phase C):** complex/bundled requests are decomposed into independent pieces; each piece is built by its own worker agent (concurrency configurable, read at call time) with its own validate/retry loop — one failing piece never sinks the rest. The plan must SPELL OUT shared contracts (view names, global keys, mechanisms) so independent workers converge. Workers can also regenerate ONE existing widget in place (same id).
+- **RECONCILE rule:** the planner reconciles against the inventory — reuse/re-home existing widgets via `viewAssignments` instead of planning duplicates.
+- Prompts are **generic capability rules**, not a per-component catalog: rules describe what the tree/bindings/actions CAN do; component specifics come from the schemas + live registry index. A **no-invented-content rule** forbids fabricating media URLs or table data.
 - Execute Tier 3 → Tier 2 → Tier 1 in order; each step validates before the next runs.
 - Every step logged to `generation_log` (tier, tokens, pass/fail, retries). **Cache-hit rate is THE success metric of this project.**
 
@@ -172,6 +186,10 @@ generation_log       (id, request_text, tier, cache_hit bool, success bool, retr
 3. Network egress from generated code only via allowlisted `capFetch`.
 4. Secrets are host-injected, never LLM-visible, never in generated source.
 5. A `review_required` flag on capabilities: v1 sets it to true and shows a one-click approve in a dev panel before a NEW capability goes live. (Composition and cached items need no approval.)
+6. **Keyless Tier 3:** generated capabilities must be API-key-free — the generator is forbidden from producing handlers that need secrets in source (enforced by validation + tests).
+7. **Media URL verification (SSRF-hardened):** every media URL in a Tier 1 tree is verified server-side before the widget is accepted — `dns.lookup` pre-check blocks private/internal addresses, fetches use `redirect: "manual"` so a public URL 302-ing to an internal address can't be used as a redirect oracle, and unverifiable/redirecting URLs are rejected back into the LLM retry loop.
+8. **Upload hardening:** attachments are served with normalized MIME types and hardened against stored XSS / header injection.
+9. Component-prop node trees are sanitized RECURSIVELY (element nodes can hide inside props).
 
 ## Dev Commands
 
@@ -179,8 +197,16 @@ generation_log       (id, request_text, tier, cache_hit bool, success bool, retr
 pnpm install
 pnpm dev            # web (:5173) + server (:3001)
 pnpm typecheck
-pnpm test           # vitest — schema + sandbox capability-API tests are mandatory
+pnpm test           # vitest — schema + sandbox capability-API tests are mandatory (~100 tests)
 ```
+
+## Deployment
+
+- Deployed as a **single Render Web Service**: the server serves the built SPA + the API from one origin. Node pinned to 22; pnpm 11 uses `allowBuilds` to permit esbuild/isolated-vm postinstall builds.
+
+## Docs
+
+- `docs/llm-request-flow.md` — end-to-end LLM request orchestration, the 3-level caching story (Supabase / HTTP immutable / runtime registry), and reuse patterns with flow diagrams.
 
 ## Coding Conventions
 
@@ -198,6 +224,8 @@ pnpm test           # vitest — schema + sandbox capability-API tests are manda
 5. **Tier 2 live:** component generation → esbuild → dynamic import loader. (Cat gif demo: LLM creates `Image` + uses `Overlay`, `placement: "pinned"` ✅)
 6. **Tier 3 live:** isolated-vm sandbox + capFetch allowlist + dev approval panel. (Giphy search capability ✅)
 7. Full pipeline demo: "add background lo-fi music with controls" — exercises all three tiers (audio component + stream proxy capability + global pinned placement).
+8. **Generative-UI rearchitecture ✅:** generic `UINode` handshake, `RequestOutcome`, position-aware placement, views/tabs, cross-widget state (`$global`/`$if`/intents), widget removal, graceful declines, "Clear all" (layout only, cache preserved).
+9. **Phase C ✅:** parallel worker agents for bundled requests, action chains, media URL verification + SSRF hardening, rules-based prompts, Render deployment.
 
 ## Out of Scope (v1)
 
