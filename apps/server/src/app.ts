@@ -14,17 +14,24 @@ import { featuresRouter } from "./routes/features";
 import { uploadsRouter } from "./routes/uploads";
 import type { SandboxRuntime } from "./sandbox";
 
-/** Compact one-line summary of a request body for the access log. Truncates
- *  any long string (base64 attachment data, definitionJson) and caps the whole
- *  thing so a request never floods the log or leaks a huge blob. */
+/** Keys whose values must never be written to logs (defense-in-depth: the app's
+ *  own bodies are {text, attachments}, but uploads and future routes could carry
+ *  secrets). */
+const SENSITIVE_KEY = /pass|token|secret|key|auth|cred|cookie|otp|pin|session/i;
+
+/** Compact one-line summary of a request body for the access log. Redacts
+ *  sensitive keys, truncates any long string (base64 attachment data,
+ *  definitionJson), and caps the whole thing so a request never floods the log,
+ *  leaks a huge blob, or exposes a credential. */
 function summarizeBody(body: unknown): string {
   if (!body || typeof body !== "object" || Array.isArray(body) || Object.keys(body).length === 0) {
     return "";
   }
   try {
-    const json = JSON.stringify(body, (_k, v) =>
-      typeof v === "string" && v.length > 120 ? `${v.slice(0, 120)}…(${v.length} chars)` : v,
-    );
+    const json = JSON.stringify(body, (k, v) => {
+      if (k && SENSITIVE_KEY.test(k)) return "[REDACTED]";
+      return typeof v === "string" && v.length > 120 ? `${v.slice(0, 120)}…(${v.length} chars)` : v;
+    });
     return json.length > 500 ? `${json.slice(0, 500)}…` : json;
   } catch {
     return "";
