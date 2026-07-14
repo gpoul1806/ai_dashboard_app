@@ -14,6 +14,23 @@ import { featuresRouter } from "./routes/features";
 import { uploadsRouter } from "./routes/uploads";
 import type { SandboxRuntime } from "./sandbox";
 
+/** Compact one-line summary of a request body for the access log. Truncates
+ *  any long string (base64 attachment data, definitionJson) and caps the whole
+ *  thing so a request never floods the log or leaks a huge blob. */
+function summarizeBody(body: unknown): string {
+  if (!body || typeof body !== "object" || Array.isArray(body) || Object.keys(body).length === 0) {
+    return "";
+  }
+  try {
+    const json = JSON.stringify(body, (_k, v) =>
+      typeof v === "string" && v.length > 120 ? `${v.slice(0, 120)}…(${v.length} chars)` : v,
+    );
+    return json.length > 500 ? `${json.slice(0, 500)}…` : json;
+  } catch {
+    return "";
+  }
+}
+
 export function createApp(deps: {
   db: Db;
   orchestrator: Orchestrator;
@@ -26,13 +43,18 @@ export function createApp(deps: {
   app.use(express.json({ limit: "30mb" }));
 
   // Per-request access log → stdout (visible in Render's Logs tab). One line
-  // per request: method, path, status, duration. Static SPA assets are skipped
-  // so generation/API traffic stays readable.
+  // per request: method, path, status, duration, and a compact body summary
+  // (so you can see what was actually asked). Long strings (base64 attachment
+  // data, definitionJson) are truncated so the log never floods. Static SPA
+  // assets are skipped to keep the stream readable.
   app.use((req: Request, res: Response, next: NextFunction) => {
     if (!req.path.startsWith("/api")) return next();
     const start = Date.now();
+    const body = summarizeBody(req.body);
     res.on("finish", () => {
-      console.log(`[req] ${req.method} ${req.originalUrl} ${res.statusCode} ${Date.now() - start}ms`);
+      console.log(
+        `[req] ${req.method} ${req.originalUrl} ${res.statusCode} ${Date.now() - start}ms${body ? ` ${body}` : ""}`,
+      );
     });
     next();
   });
