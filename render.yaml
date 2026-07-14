@@ -1,0 +1,28 @@
+# Render blueprint — single Web Service that serves the API AND the built SPA.
+# The Express server is a long-running process: it keeps the Tier-3 sandbox
+# (worker_threads / isolated-vm) warm and has no per-request timeout, which the
+# generation pipeline (30–90s LLM builds) needs — a fit serverless can't offer.
+#
+# Secrets (ANTHROPIC_API_KEY, SUPABASE_*) are marked sync:false: Render prompts
+# for them in the dashboard on first deploy; they are NEVER stored in the repo.
+services:
+  - type: web
+    name: my-day
+    runtime: node
+    plan: free # bump to "starter" for an always-on instance (no cold-start spin-down)
+    # --prod=false forces devDependencies (tsx, vite, typescript) to install even
+    # though Render sets NODE_ENV=production; they persist into the run stage.
+    buildCommand: corepack enable && pnpm install --prod=false && pnpm build
+    startCommand: pnpm start
+    healthCheckPath: /api/health
+    envVars:
+      - key: NODE_VERSION
+        value: "22"
+      - key: LLM_MODEL
+        value: claude-sonnet-4-6
+      - key: ANTHROPIC_API_KEY
+        sync: false
+      - key: SUPABASE_URL
+        sync: false
+      - key: SUPABASE_SERVICE_ROLE_KEY
+        sync: false

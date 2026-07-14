@@ -4,9 +4,12 @@
   "version": "0.1.0",
   "scripts": {
     "dev": "pnpm --parallel --filter @myday/web --filter @myday/server dev",
+    "build": "pnpm --filter @myday/web build",
+    "start": "pnpm --filter @myday/server start",
     "typecheck": "pnpm -r typecheck",
     "test": "pnpm -r test"
   },
+  "packageManager": "pnpm@11.12.0",
   "engines": {
     "node": ">=20"
   }

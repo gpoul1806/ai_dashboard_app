@@ -1,3 +1,6 @@
+import { existsSync } from "node:fs";
+import path from "node:path";
+import { fileURLToPath } from "node:url";
 import cors from "cors";
 import express, { type Express, type NextFunction, type Request, type Response } from "express";
 import { HttpError } from "./config";
@@ -32,6 +35,20 @@ export function createApp(deps: {
   app.use("/api/data", dataRouter(db));
   app.use("/api/uploads", uploadsRouter(db));
   app.use("/api/dyn", dynRouter(db, sandbox));
+
+  // Production single-service: serve the built SPA and let client-side routing
+  // handle any non-/api path (deep links → index.html). Skipped in dev, where
+  // Vite serves the SPA and proxies /api here — the dist dir won't exist.
+  const here = path.dirname(fileURLToPath(import.meta.url)); // apps/server/src
+  const webDist = path.resolve(here, "../../web/dist");
+  if (existsSync(webDist)) {
+    app.use(express.static(webDist));
+    app.get("*", (req, res, next) => {
+      if (req.path.startsWith("/api")) return next(); // let unknown /api 404 normally
+      res.sendFile(path.join(webDist, "index.html"));
+    });
+    console.log(`[server] serving SPA from ${webDist}`);
+  }
 
   // Centralized error handler → JSON { error }.
   app.use((err: unknown, _req: Request, res: Response, _next: NextFunction) => {
