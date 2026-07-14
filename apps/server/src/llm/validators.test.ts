@@ -1,11 +1,29 @@
 import { describe, expect, it } from "vitest";
 import {
   validateCapabilitySpec,
+  validatePlan,
   validateTier1Wire,
   validateWidgetDefinition,
 } from "./validators";
 
 const NO_GENERATED = new Set<string>();
+
+describe("validatePlan — cacheHit needs no build plan", () => {
+  it("accepts a feasible plan that only sets cacheHit (empty widgetPlan)", () => {
+    const result = validatePlan({
+      intent: "create",
+      feasible: true,
+      cacheHit: "seed-todo",
+      widgetPlan: "",
+    });
+    expect(result.ok).toBe(true);
+  });
+
+  it("still rejects a feasible create plan with no cacheHit and no plan", () => {
+    const result = validatePlan({ intent: "create", feasible: true, widgetPlan: "" });
+    expect(result.ok).toBe(false);
+  });
+});
 
 describe("validateWidgetDefinition — free-form trees", () => {
   const def = (root: unknown) => ({

@@ -62,14 +62,17 @@ export function validatePlan(raw: unknown): Validated<Plan> {
       };
     }
   } else if (
+    !plan.cacheHit &&
     !plan.widgetPlan.trim() &&
     plan.moreWidgetPlans.every((p) => !p.trim()) &&
     plan.updatePlans.length === 0
   ) {
+    // A cacheHit legitimately has no build/update plan — the cached feature is
+    // served as-is. Only require a plan when nothing else will produce output.
     return {
       ok: false,
       errors: [
-        "widgetPlan: required when feasible is true (or provide updatePlans when modifying existing widgets)",
+        "widgetPlan: required when feasible is true (or set cacheHit, or provide updatePlans when modifying existing widgets)",
       ],
     };
   }

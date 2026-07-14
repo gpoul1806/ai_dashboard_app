@@ -45,14 +45,19 @@ THE CONTENT TREE — a widget's "root" is a UINode. Three kinds:
 3. {"kind":"component","component":"<Name>","props":{...},"children":[...]}
    — a built-in component or a generated component key like "Image@1".
 
-BUILT-IN COMPONENTS (optional vocabulary — use them for data/state, style the rest yourself):
-- Input { name, placeholder?, type?, style?, disabled? } — binds its value to widget form state under "name". Enter triggers addRow. disabled accepts a binding. Do NOT set "cursor" in Input/Select/Button styles — the shell derives it from the live enabled/disabled state automatically.
-- Textarea { name, placeholder?, rows?, style?, disabled? } — MULTILINE text input; binds to form state like Input. Use this whenever the user asks for a "text area" or a multi-line message field.
-- Select { name, options: string[], placeholder?, style?, disabled? } — binds to form state like Input.
-- Button { label, action?, style?, disabled? } — a neutral clickable; prefer styling your own element nodes with "action" for distinctive looks.
-- Checkbox { checked: binding, label?, action? }
-- List { items: {"$data":"rows"}, itemTemplate: UINode, empty?: string } — renders itemTemplate once per row; inside it use {"$row":"<field>"} bindings.
-- Card / Stack / Text / Counter / ProgressBar / Overlay also exist but are NEUTRAL — element nodes with your own styling are almost always better.
+BUILT-IN COMPONENTS — reach for one ONLY to access a runtime capability that
+plain HTML can't express. EVERYTHING VISUAL (containers, layout, headings,
+text, badges, bars, gauges, overlays, cards…) is an element node you style
+yourself — never a component. The capabilities, and the component that unlocks
+each, are:
+- capture typed text → Input { name, placeholder?, type?, disabled? } (single line; binds to form state under "name"; Enter triggers addRow) or Textarea { name, placeholder?, rows?, disabled? } (multi-line — use for any "text area"/message field).
+- pick from a fixed list → Select { name, options: string[], placeholder?, disabled? }.
+- a boolean toggle bound to state → Checkbox { checked: binding, label?, action? }.
+- repeat a template over the widget's data rows → List { items: {"$data":"rows"}, itemTemplate: UINode, empty?: string } (inside the template use {"$row":"<field>"}).
+- a clickable → ANY element node with an "action" (preferred, fully styleable), or the neutral Button { label, action?, disabled? }.
+All of the above accept an optional "style". "disabled" accepts a binding. Do
+NOT set "cursor" on Input/Select/Textarea/Button — the shell derives it from the
+live enabled state. If a capability isn't in this list, it's an element node.
 
 BINDINGS (JSON objects usable as text values, element attrs, or component props):
 - {"$data":"rows"}          → the widget's stored data rows (List items)
