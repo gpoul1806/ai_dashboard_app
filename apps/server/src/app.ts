@@ -25,6 +25,18 @@ export function createApp(deps: {
   // Limit accommodates base64-encoded file attachments (uploads route caps at 20 MB/file).
   app.use(express.json({ limit: "30mb" }));
 
+  // Per-request access log → stdout (visible in Render's Logs tab). One line
+  // per request: method, path, status, duration. Static SPA assets are skipped
+  // so generation/API traffic stays readable.
+  app.use((req: Request, res: Response, next: NextFunction) => {
+    if (!req.path.startsWith("/api")) return next();
+    const start = Date.now();
+    res.on("finish", () => {
+      console.log(`[req] ${req.method} ${req.originalUrl} ${res.statusCode} ${Date.now() - start}ms`);
+    });
+    next();
+  });
+
   app.get("/api/health", (_req, res) => {
     res.json({ ok: true, db: db.kind, sandbox: sandbox.engine });
   });
