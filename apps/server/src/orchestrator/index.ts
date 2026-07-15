@@ -37,7 +37,7 @@ import {
   Tier2WireSchema,
   Tier3WireSchema,
 } from "../llm/wire";
-import type { SandboxRuntime } from "../sandbox";
+import { createSandbox, makeHostApi, type SandboxRuntime } from "../sandbox";
 
 export type OrchestratorResult =
   | {
@@ -373,12 +373,21 @@ export class Orchestrator {
   ): Promise<string[]> {
     const pendingApprovals: string[] = [];
     for (const need of plan.needsCapabilities) {
+      // Spec validation + smoke test inside the retry loop: a handler whose
+      // upstream URL is dead or invented fails HERE (errors fed back to the
+      // LLM), never as a widget that can't load.
+      const validate = async (raw: unknown): Promise<Validated<CapabilitySpec>> => {
+        const checked = await validateCapabilitySpec(raw);
+        if (!checked.ok) return checked;
+        const errors = await this.smokeTestCapability(checked.value);
+        return errors.length > 0 ? { ok: false, errors } : checked;
+      };
       const spec = await generateValidated(
         "tier3",
         tier3System(),
         `User request: ${requestText}\n\nGenerate this capability: id "${need.id}" — ${need.description}\nUse version 1.`,
         Tier3WireSchema,
-        validateCapabilitySpec,
+        validate,
         (tokens, retries, success) =>
           void this.log(requestText, "tier3", false, success, retries, tokens),
         [],
@@ -402,6 +411,44 @@ export class Orchestrator {
       pendingApprovals.push(key);
     }
     return pendingApprovals;
+  }
+
+  /** Executes each GET endpoint once in a THROWAWAY sandbox (same host API,
+   *  same allowlist) before the capability is stored. A crash or a 5xx —
+   *  typically a dead/hallucinated upstream URL — is a validation failure.
+   *  4xx passes (defensive missing-param responses are fine). The ephemeral
+   *  runtime is disposed and never serves /api/dyn, so safety rail #5
+   *  (approval before going live) is untouched. */
+  private async smokeTestCapability(spec: CapabilitySpec): Promise<string[]> {
+    const errors: string[] = [];
+    const runtime = await createSandbox(makeHostApi(this.db), "worker");
+    try {
+      await runtime.register(spec);
+      const key = capabilityKey(spec);
+      for (const ep of spec.endpoints) {
+        if (ep.method !== "GET") continue;
+        try {
+          const res = await runtime.dispatch(key, {
+            method: "GET",
+            path: ep.path,
+            query: {},
+            body: null,
+          });
+          if (res.status >= 500) {
+            errors.push(
+              `smoke test GET ${ep.path}: handler returned ${res.status} — ${JSON.stringify(res.body)?.slice(0, 300)}. The upstream URL or response format is wrong: call ONLY an endpoint you are certain exists and parses as expected, or pick a different keyless source.`,
+            );
+          }
+        } catch (err) {
+          errors.push(
+            `smoke test GET ${ep.path}: handler crashed — ${(err as Error).message}`,
+          );
+        }
+      }
+    } finally {
+      await runtime.dispose();
+    }
+    return errors;
   }
 
   /* -------------------- Tier 2 -------------------- */

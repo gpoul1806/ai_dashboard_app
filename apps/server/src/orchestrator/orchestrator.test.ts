@@ -612,3 +612,64 @@ describe("Orchestrator — Tier 3 + Tier 2 + Tier 1", () => {
     expect(res).toEqual({ status: 200, body: { url: "https://cataas.test/cat.gif" } });
   });
 });
+
+describe("Orchestrator — Tier 3 smoke test", () => {
+  const capSpec = (handlerSource: string) => ({
+    id: "cat-gif",
+    name: "Cat Gif",
+    version: 1,
+    description: "returns a random cat gif url",
+    domainAllowlist: ["api.thecatapi.com"],
+    endpoints: [{ method: "GET", path: "/random", handlerSource }],
+  });
+
+  it("rejects a handler whose upstream is dead (5xx) and ships the retried spec", async () => {
+    responses.push(
+      // plan
+      {
+        widgetPlan: "an image widget backed by the cat-gif capability",
+        needsCapabilities: [{ id: "cat-gif", description: "return a random cat gif url" }],
+      },
+      // tier 3, attempt 1 — smoke test gets a 502 → validation failure → retry
+      capSpec("async (req, ctx) => ({ status: 502, body: { error: 'dead upstream' } })"),
+      // tier 3, attempt 2 — healthy handler
+      capSpec("async (req, ctx) => ({ status: 200, body: { url: 'https://cataas.test/cat.gif' } })"),
+      // tier 1 — consumes the capability via a browser-fetched src attr
+      tier1Wire({
+        id: "cat-gif-widget",
+        name: "Cat Gif",
+        description: "a random cat gif",
+        version: 1,
+        requiresCapabilities: ["cat-gif@1"],
+        root: {
+          kind: "element",
+          tag: "img",
+          attrs: { src: "/api/dyn/cat-gif@1/random" },
+        },
+      }),
+    );
+
+    const result = await orchestrator.handleRequest("a cat gif");
+    expect(result.status).toBe("ok");
+
+    // Only the healthy spec was stored.
+    const caps = await db.listCapabilities();
+    expect(caps).toHaveLength(1);
+    expect(caps[0].spec.endpoints[0].handlerSource).toContain("status: 200");
+  });
+
+  it("fails the piece when the handler still 5xxes after the retry", async () => {
+    responses.push(
+      {
+        widgetPlan: "an image widget backed by the cat-gif capability",
+        needsCapabilities: [{ id: "cat-gif", description: "return a random cat gif url" }],
+      },
+      capSpec("async (req, ctx) => ({ status: 502, body: { error: 'dead upstream' } })"),
+      capSpec("async (req, ctx) => ({ status: 500, body: { error: 'still dead' } })"),
+    );
+
+    const result = await orchestrator.handleRequest("a cat gif");
+    expect(result.status).toBe("declined");
+    expect(await db.listCapabilities()).toHaveLength(0);
+  });
+});
